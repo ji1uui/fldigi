@@ -7,6 +7,9 @@ lib/
 test/test_modem
 test/test_rtty_cw
 test/test_portaudio
+test/test_rigcontrol
+test/test_station_adif
+test/test_contestlog
 forms/DemoModemApp
 *.res
 backup/

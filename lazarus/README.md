@@ -31,7 +31,10 @@ lazarus/
 │   ├── RigPollThread.pas         リグ状態監視スレッド TRigPollThread (fldigi: hamlib_loop)
 │   ├── StationInfo.pas           局情報 (コールサイン等) の記憶 (fldigi: progdefaults)
 │   ├── AdifUdpSender.pas         ADIF-over-UDP 外部ロガー連携
-│   └── QsoLogbook.pas            本アプリ内蔵QSOロギング (fldigi: cQsoDb)
+│   ├── QsoLogbook.pas            本アプリ内蔵QSOロギング (fldigi: cQsoDb)
+│   ├── AdifFile.pas              完全版ADIF入出力 (fldigi: cQsoRec/cQsoDb)
+│   ├── DxccDatabase.pas          cty.dat解析・DXCC/ゾーン判定 (fldigi: dxcc.cxx)
+│   └── ContestLog.pas            コンテストロギング (fldigi: contest.cxx/counties.cxx)
 ├── forms/                  -- LCL (GUI) を使った実装例
 │   ├── UnitMainForm.pas    TForm 継承のメインフォーム実装例
 │   ├── DemoModemApp.lpr    デモアプリのエントリポイント
@@ -41,7 +44,8 @@ lazarus/
     ├── test_rtty_cw.lpr      RTTY/CW 送受信ループバックテスト
     ├── test_portaudio.lpr    PortAudio バインディングの動作確認テスト
     ├── test_rigcontrol.lpr   Hamlib CAT制御の動作確認テスト (疑似CAT通信)
-    └── test_station_adif.lpr 局情報記憶/ADIF-UDP送信/内蔵ロギングの動作確認テスト
+    ├── test_station_adif.lpr 局情報記憶/ADIF-UDP送信/内蔵ロギングの動作確認テスト
+    └── test_contestlog.lpr   コンテストロギング/DXCC・ゾーン判定の動作確認テスト
 ```
 
 ## 1. モデムエンジン設計 (`TCustomModem` / `TModemEngine`)
@@ -800,3 +804,201 @@ fpc -Sood -Mobjfpc -Fuunits -FUunits -FEtest -o test/test_station_adif test/test
   UDP送信の有効化トグルスイッチは、`units/` のコアロジックとしては
   完成しているが、`forms/UnitMainForm.pas` への実際の組み込み
   (入力フォームの追加) は今後の拡張タスクとする。
+
+## 8. コンテストロギング (`units/ContestLog.pas`) / DXCC・ゾーン判定
+   (`units/DxccDatabase.pas`)
+
+コンテスト運用時の交換ナンバー (Exchange) の書式検証・シリアルナンバー
+発行・重複交信(Dupe)チェックと、コールサインからDXCC国名/CQゾーン/
+ITUゾーン/大陸を判定する機能を実装した。前者は fldigi の
+`src/logbook/contest.cxx`・`src/logbook/counties.cxx`、後者は
+`src/misc/dxcc.cxx`・`src/logbook/cty-dat.cxx` の解析結果に基づく。
+
+### fldigi との対応表
+
+| fldigi (C++)                                        | Lazarus (Pascal)                          | 役割 |
+|--------------------------------------------------------|----------------------------------------------|------|
+| `enum CONTEST_FIELD` (contest.h)                      | `TContestFieldKind` (ContestLog.pas)         | 交換ナンバーのフィールド種別 |
+| `state_test()`/`province_test()`/`section_test()`/…   | `ContestStateTest`/`ContestProvinceTest`/`ContestSectionTest`/… | 各フィールドの書式検証関数群 |
+| `check_field()`                                       | `TContestDefinition`/`TContestLog.ValidateExchange` | フィールド種別に応じた検証の一括実行 |
+| `country_test()` (dxcc_entity_list()を利用)           | `ContestCountryTest` (DxccDatabase.pas を利用) | DXCC国名の部分一致判定 |
+| `CONTESTS contests[]`                                 | `TContestRegistry.RegisterBuiltins`          | 組み込みコンテスト定義 (15件) |
+| `struct QSOP`/`Ccontests::qso_parties[]` (米国州QSOパーティ約90件) | `TContestDefinition` (汎用の型のみ移植。データは移植せず) | コンテスト毎の交換フィールド定義 |
+| `class Cstates` (counties.cxx)                        | `TCountyDatabase` (ContestLog.pas)            | 郡(County)データのCSV読込・検証 |
+| `struct dxcc` (dxcc.h)                                | `TDxccEntry` (DxccDatabase.pas)               | 1個のDXCCエンティティの情報 |
+| `dxcc_open()`/`dxcc_close()`/`dxcc_is_open()`          | `TDxccDatabase.LoadFromFile`/`Clear`/`IsOpen` | cty.dat の読み込み・解放 |
+| `dxcc_lookup()` (完全一致→最長プリフィクス一致)        | `TDxccDatabase.Lookup`                       | コールサイン→DXCCエンティティ判定 |
+| `add_prefix()` (プリフィクス修飾子の解析)              | `TDxccDatabase` 内部の `AddPrefix` (private)  | CQ/ITUゾーン・大陸の例外上書き解析 |
+| (該当なし。fldigi自体にはロギング機能付きの            | `TContestLog` (本移植版オリジナル)            | シリアルナンバー発行・重複チェック・ |
+| コンテストクラスは無い)                                |                                                | AdifFile.pas 連携ロギング |
+
+### なぜこの設計か (米国州QSOパーティを全件移植しなかった理由)
+
+fldigi のソースコードを解析した結果、コンテスト関連のロジックは大きく
+2種類に分かれることが分かった:
+
+1. **再利用可能な汎用ロジック**: 数字/カットナンバー/RST/ARRLセクション/
+   Sweepstakesのプレシデンス等の書式検証関数、および cty.dat という
+   標準フォーマットのファイルを解析してDXCC国名・ゾーン・大陸を求める
+   エンジン。これらは「ロジックを読んで移植する」という今回のタスクの
+   対象そのものであり、本ユニットでは fldigi の実装を忠実に踏襲した。
+2. **大量の静的データ**: `qso_parties[]` (米国50州+カナダ州の約90件の
+   QSOパーティそれぞれについて、州内局/州外局のどちらが何を送るかを
+   定めた固定テーブル) と、その郡データ (`SQSO.txt`/`6QP.txt`/`7QP.txt`、
+   FIPS 2010年人口調査由来で州によっては100郡以上)。これは「ロジック」
+   ではなく随時更新されうる「データ」であり、かつユーザー要望が
+   「fldigiの翻訳ではなく新規開発」であることから、全件を手作業で
+   書き写すことはしなかった。
+
+   代わりに、同じ表現力を持つ汎用の `TContestDefinition`/
+   `TContestExchangeField`/`TCountyDatabase` という型を用意し、実際に
+   `CONTESTS contests[]` (米国州限定ではない国際/一般コンテスト一覧) から
+   15件を抜粋して `TContestRegistry.RegisterBuiltins` に組み込んだ。
+   郡データも counties.cxx と同じ「外部CSVファイルから読み込む」設計
+   (`TCountyDatabase.LoadFromFile`) としたため、利用者が郡データCSVと
+   対応する `TContestDefinition` (`Counties` プロパティに紐付け) を
+   用意すれば、`qso_parties[]` 相当の州QSOパーティをいくらでも
+   追加登録できる「データ駆動で全件を再現可能な枠組み」になっている。
+
+同様に、DXCC判定の内蔵フォールバックデータ (`cty-dat.cxx` の
+`s_ctydat`、当時最新版のcty.dat全文約1300行) も移植しなかった。
+これも「データ」であり、運用者は fldigi と同じ配布元
+([country-files.com](https://www.country-files.com/)、AD1C氏が月次更新)
+から最新の `cty.dat` をダウンロードして `TDxccDatabase.LoadFromFile`
+で読み込む運用とする。
+
+### 設計判断のポイント
+
+- **DXCC判定はコンテスト機能から独立したユニットに分離**: `country_test()`
+  は fldigi でも dxcc.cxx への依存として実装されている。本移植版も
+  この依存関係自体は保つが、DXCC/ゾーン判定はコンテスト機能に限らず
+  将来の `CallsignLookup.pas` 等でも使う共通基盤のため、独立した
+  `DxccDatabase.pas` として切り出した。
+- **プリフィクス検索には `Generics.Collections.TDictionary` を使用**:
+  実際の cty.dat は例外コールサイン (`=AA0O(5)[8]` 等) を含めると
+  数万件のキーを持つ。他ユニット (AdifFile.pas 等) はフィールド数が
+  高々60個程度のため単純な配列・線形探索で十分だが、本ユニットは
+  規模が2桁以上大きいため、O(1)平均のハッシュマップを採用した
+  (FPC 3.2.2 で `{$mode objfpc}` でも `Generics.Collections` は
+  問題なく使用できることを確認済み)。
+- **AdifFile.pas を実データストアとして利用**: `TContestLog` は独自の
+  QSOレコード型を持たず、`AdifFile.pas` の `TAdifDatabase`/`TAdifRecord`
+  をそのまま内部で使う。ADIFフィールド (SRX/STX/CLASS/ARRL_SECT/
+  CWSS_SERNO等) は既に `AdifFile.pas` 側に用意されていたため、
+  `ContestLog.pas` の役割は「検証」と「シリアルナンバー発行」と
+  「重複チェック」と「DXCC自動補完」に集中できた。
+- **rst_test()のモード依存を明示的な引数に変更**: fldigi の `rst_test()`
+  は `active_modem->get_mode()` というグローバルなモデム状態を直接
+  参照するが、本ユニットは他の `units/` 配下ユニットと同じく
+  GUI/モデムエンジンに一切依存しない設計方針のため、
+  `ARequireThreeChar: Boolean` という明示的な引数に置き換えた。
+- **DXCCデータ/郡データ未ロード時は寛容側にフォールバック**: fldigi の
+  `country_test()` は `dxcc_entity_list()` が null (cty.dat未ロード) の
+  場合、無条件で true を返す設計になっている。本移植版の
+  `ContestCountryTest`/`ContestCountyTest` も同じフォールバック
+  (`ADxcc`/`ACounties` が nil なら常に有効とみなす) を踏襲しており、
+  データファイルを未設定のまま運用してもコンテストロギング自体は
+  ブロックされない。
+
+### 8-1. 検証手順
+
+実際の cty.dat ファイルや郡データCSVファイルは使わず、fldigi の
+`cty-dat.cxx`/`counties.cxx` のフォーマットに従った小規模なサンプル
+データをテストプログラム内に直接埋め込み、実データとして解析・検索
+させることで検証する。
+
+```bash
+fpc -Sood -Mobjfpc -Fuunits -FUunits -FEtest -o test/test_contestlog test/test_contestlog.lpr
+./test/test_contestlog
+```
+
+このサンドボックス環境での実行結果 (抜粋):
+
+```
+=== コンテストロギング (ContestLog) / DXCC・ゾーン判定 (DxccDatabase) 検証 ===
+
+--- 1. 単体フィールド検証関数の確認 ---
+  [OK] ContestStateTest(CA) = True
+  ...(31件、すべてOK)...
+
+--- 2. ContestCountryTest (DxccDatabase連携) の確認 ---
+  [OK] DxccDatabase未指定(nil)なら常にTrue (fldigiのフォールバック挙動)
+  [OK] ContestCountryTest(JAPAN) = True, matched=Japan
+  [OK] ContestCountryTest(存在しない国名) = False
+
+--- 3. TCountyDatabase (郡データCSV読込) の確認 ---
+  [OK] LoadFromFile が3件読み込む
+  ...(9件、すべてOK)...
+
+--- 4. TContestRegistry (組み込みコンテスト定義) の確認 ---
+  [OK] RegisterBuiltins で14件以上登録される (実際: 15件)
+  [OK] FindByName(CQ WW DX) が見つかる
+  [OK] CQ WW DX の交換フィールド数は2 (COUNTRY, ZONE)
+  ...
+
+--- 5. TContestLog (検証+シリアル発行+重複チェック+ADIF連携) の確認 ---
+  [OK] Definition に CQ WW DX を設定できる
+  [OK] 正しい交換ナンバー(JAPAN, Zone 25)は全項目が有効
+  [OK] 不正な交換ナンバーは2項目とも失敗として検出される (実際: 2件)
+  [OK] LogQso がレコードを返す
+  [OK] Dxcc自動補完で COUNTRY=United States が設定される (実際: United States)
+  [OK] Dxcc自動補完で CQZ=5 (W1AWの例外上書き) が設定される (実際: 5)
+  [OK] Dxcc自動補完で ITUZ=8 が設定される
+  [OK] Dxcc自動補完で CONT=NA が設定される
+  [OK] 自動採番されたSTX(送信シリアル)は1
+  [OK] IsDuplicate(W1AW,20m,RTTY) = True (1件目と同条件)
+  [OK] IsDuplicate(W1AW,40m,RTTY) = False (バンド違い)
+  [OK] 同一条件で3回目のLogQsoはDupe=Trueを返す (記録自体は行う)
+  [OK] SaveToAdif が成功する
+  [OK] LoadFromAdif で3件読み込む
+  ...
+
+=== テスト完了: 0 件の失敗 (全 75 件中) ===
+```
+
+この結果から、以下が実データで確認できた:
+
+- fldigi の cty.dat 形式パーサ (`TDxccDatabase.LoadFromString`/
+  `LoadFromFile`) が、ヘッダ行 (国名:CQ:ITU:大陸:緯度:経度:GMT:主
+  プリフィクス:) と複数行にまたがるプリフィクスリストを正しく解析し、
+  完全一致例外コールサイン (`=W1AW(5)[8]` のようなCQ/ITUゾーン上書き
+  付き) を含めて実際にコールサインからCQゾーン/ITUゾーン/大陸を
+  正しく引けること。
+- `TContestLog.LogQso` が `TDxccDatabase.Lookup` の結果を使って
+  COUNTRY/CQZ/ITUZ/CONT を自動補完し、`AdifFile.pas` の
+  `TAdifRecord`/`TAdifDatabase` へ実際に記録・ADIFファイルへ永続化
+  できること (再読込後も内容が往復する)。
+- `TContestLog.ValidateExchange` が `TContestDefinition` の
+  フィールド定義に従って交換ナンバー各項目を検証し、不正な入力
+  (存在しない国名、範囲外のCQゾーン等) を正しく検出すること。
+- 重複交信(Dupe)チェックがバンド・モード単位で正しく機能すること。
+- `TCountyDatabase.LoadFromFile` が counties.cxx と同じCSVフォーマット
+  (ヘッダ行1行 + `State,ST,County,CTY` の4列) を正しく読み込み、
+  正式名・略号どちらでも郡の有効性判定ができること。
+
+### コンテストロギング/DXCC判定関連の既知の制約・省略した範囲
+
+- 米国州QSOパーティ (`qso_parties[]` 約90件) は全件を移植していない。
+  上記「なぜこの設計か」の通り、`TContestDefinition`/`TCountyDatabase`
+  という同等の表現力を持つ枠組みは用意したので、必要な州のQSOパーティ
+  データ (CSV) を用意すれば追加登録が可能。
+- cty.dat / 郡データCSVの内蔵フォールバックデータは埋め込んでいない。
+  運用前に [country-files.com](https://www.country-files.com/) から
+  最新の `cty.dat` を、および必要な州QSOパーティの郡データCSVを
+  別途用意する必要がある (未設定でも寛容フォールバックにより
+  コンテストロギング自体はブロックされない)。
+- `TContestLog.LogQso` はADIFの `DXCC` (数値の国コード) フィールドは
+  自動補完しない。cty.dat 自体には国名文字列しか含まれておらず、
+  ADIFの数値国コード表 (別ファイル) との対応付けは本移植版のスコープ
+  外としたため (`COUNTRY`/`CQZ`/`ITUZ`/`CONT` の4項目のみ自動補完)。
+- Sweepstakesの `ss_chk_test()` は fldigi の実装 (関数名に反して
+  「先頭1文字が数字か」しか見ていない簡易な実装) をそのまま踏襲した。
+  fldigi 側の実装自体がこの通りであることをソースコードで確認済み。
+- 重複交信(Dupe)判定はコールサイン・バンド・モードの3項目一致のみ
+  (fldigiにも本ユニットに対応する既存実装は無く、一般的なコンテスト
+  ロギングソフトの標準的な定義に基づく本移植版オリジナルの追加機能)。
+  マルチプライヤーの重複判定・得点計算は現時点では未実装。
+- GUI (LCL) からの交換ナンバー入力欄・コンテスト選択UI・cty.dat/郡CSV
+  ファイル選択ダイアログは、`units/` のコアロジックとしては完成して
+  いるが、`forms/UnitMainForm.pas` への実際の組み込みは今後の拡張
+  タスクとする。
