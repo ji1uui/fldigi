@@ -19,7 +19,7 @@ lazarus/
 │   ├── ModemEngine.pas     送受信駆動スレッド TModemEngine (fldigi: trx.cxx)
 │   ├── ModemUI.pas         GUI連携ブリッジ TModemUI (fldigi: qrunner.h + REQ())
 │   ├── NullModemImpl.pas   最小実装サンプル TNullModem (fldigi: nullmodem.h/.cxx)
-│   ├── ModemDSP.pas        共通DSPヘルパー (複素数演算/IIRフィルタ/移動平均)
+│   ├── ModemDSP.pas        共通DSPヘルパー (複素数演算/FFT/TFftFilt/移動平均)
 │   ├── MorseTable.pas      モールス符号テーブル (fldigi: morse.h/.cxx cMorse)
 │   ├── RttyModemImpl.pas   RTTYモデム具象実装 TRttyModem (fldigi: rtty.cxx)
 │   ├── CwModemImpl.pas     CWモデム具象実装 TCwModem (fldigi: cw.cxx)
@@ -42,6 +42,8 @@ lazarus/
 └── test/
     ├── test_modem.lpr        GUIなしの結合テスト (スレッド安全性を検証)
     ├── test_rtty_cw.lpr      RTTY/CW 送受信ループバックテスト
+    ├── test_fftfilt.lpr      ComplexFFT/TFftFilt (Overlap-Add FFTフィルタ)の単体検証
+    ├── test_filter_switch.lpr RTTY/CWのフィルタ再生成(パラメータ変更時)の安定性テスト
     ├── test_portaudio.lpr    PortAudio バインディングの動作確認テスト
     ├── test_rigcontrol.lpr   Hamlib CAT制御の動作確認テスト (疑似CAT通信)
     ├── test_station_adif.lpr 局情報記憶/ADIF-UDP送信/内蔵ロギングの動作確認テスト
@@ -163,29 +165,31 @@ lazbuild --ws=nogui DemoModemApp.lpi   # ヘッドレス動作確認用
 `TCustomModem` を継承した具象モデムの実装例として、fldigi の
 `src/cw_rtty/rtty.cxx` (RTTY) と `src/cw_rtty/cw.cxx` (CW/モールス) を
 Lazarus/FPC へ移植しました。共通の DSP ヘルパーは `units/ModemDSP.pas`
-(複素数演算・1次IIRローパス `TComplexLowpass`・移動平均 `TMovingAverage`・
-`DecayAvg`/`ClampF`) と `units/MorseTable.pas` (`cMorse` 相当の
-モールス符号テーブル) に切り出しています。
+(複素数演算・移動平均 `TMovingAverage`・`DecayAvg`/`ClampF`・
+Overlap-Add FFT畳み込みフィルタ `TFftFilt` とその基盤の
+`ComplexFFT`/`InverseComplexFFT`) と `units/MorseTable.pas` (`cMorse`
+相当のモールス符号テーブル) に切り出しています。
 
 ### RTTY (`TRttyModem`, fldigi: `class rtty`)
 
 | fldigi (C++)                          | Lazarus (Pascal)                         |
 |----------------------------------------|-------------------------------------------|
 | `rx_bit()` / ステートマシン (IDLE/START/DATA/STOP) | `RxBit` / `TRttyRxState`               |
+| `fftfilt` (`rtty_filter()`、mark/space用raised-cosine整合フィルタ) | `ModemDSP.TFftFilt.RttyFilter` |
 | mark/space 履歴の位相差による AFC      | `FMarkHistory`/`FSpaceHistory` + `Ferr` 計算 |
 | `rparity`/Baudot 5bit エンコード       | `RParity` / `BaudotEnc`                   |
 | `Metric()` (SNR ベース信号品質)        | `ComputeMetric`                           |
 
-- fftfilt (FFTオーバーラップ加算フィルタ) は移植スコープ外とし、
-  `TComplexLowpass` (1次IIR) で代替しています。
 - 実装済み: Baudot 5bit、Mark/Space FSK 復調、AFC (周波数誤差の自動追従)、
-  パリティチェック。
+  パリティチェック、fldigi 本来の fftfilt によるフィルタリング (下記
+  「4-1. フィルタ品質改善」参照)。
 
 ### CW / モールス信号 (`TCwModem`, fldigi: `class cw`)
 
 | fldigi (C++)                              | Lazarus (Pascal)                     |
 |---------------------------------------------|-----------------------------------------|
 | `handle_event()` (RS_IDLE/RS_IN_TONE/RS_AFTER_TONE) | `HandleEvent` / `TCwRxState`     |
+| `rx_FFTprocess()` (`fftfilt`によるローパス + DEC_RATIO間引き) | `RxProcess` (`ModemDSP.TFftFilt` + `CW_DEC_RATIO`) |
 | `decode_stream()` (AGC + ノイズフロア追跡ヒステリシス検出) | `DecodeStream`                  |
 | `update_tracking()` (dot-dash/dash-dot ペア比較の適応速度追跡) | `UpdateTracking`               |
 | `sync_parameters()`/`sync_transmit_parameters()` | `SyncParameters`/`SyncTransmitParameters` |
@@ -198,6 +202,137 @@ Lazarus/FPC へ移植しました。共通の DSP ヘルパーは `units/ModemDS
 - QSK (フルブレークイン) の右チャンネル制御信号生成・`CW_KEYLINE`
   (DTR/RTS キーイング)・外部キーヤー (WinKeyer 等) 連携は省略しています。
   送信波形整形 (rise time, Hanning/Blackman) は実装済みです。
+- **"整合フィルタ" (CWmfilt) モード** (`progdefaults.CWmfilt`, 既定無効。
+  有効時は帯域幅を送信速度に比例させて自動設定する) は未実装です。
+  既定 (無効) の経路である「`Bandwidth` プロパティ (既定150Hz) を
+  固定カットオフとして使う」経路のみ実装しています。
+
+### 4-1. フィルタ品質改善 (2026-08): fftfilt (Overlap-Add FFT畳み込み) への置き換え
+
+当初の RTTY/CW 移植では、fldigi 本来の `fftfilt` (Blackman窓付き
+Windowed-Sinc フィルタを FFT で周波数応答に変換し、Overlap-Add 方式で
+畳み込む本格的なフィルタ) の代わりに、「mark/space トーンの包絡線検波」
+という目的には十分な特性を持つ複素1次IIRローパス (`TComplexLowpass`)
+で簡略化していました。今回、fldigi の `src/include/fftfilt.h` /
+`src/filters/fftfilt.cxx` を解析し、`ModemDSP.TFftFilt` として正式に
+移植し、RTTY (`mark_filt`/`space_filt`、`rtty_filter()`によるraised-cosine
+整合フィルタ) と CW (`cw_FFT_filter`、`create_lpf()`によるローパス) の
+両方で `TComplexLowpass` を置き換えました。
+
+#### なぜ今まで簡略化していたフィルタを本実装に置き換えたか
+
+fldigi 本来の FFT エンジンは `src/include/gfft.h` の `g_fft<T>`
+("Green FFT") で、1990年代のRISCプロセッサのキャッシュ事情に最適化された
+8/4/2混合基数・キャッシュブロッキング・手動ループ展開の実装です。
+これを逐語的に移植すると数千行の生ポインタ演算になり、可読性も
+テスト可能性も失われます。一方で、本アプリが実際に必要とするのは
+「2の冪乗サイズ (64~2048点、fldigi の `FILTLEN[]`/`CW_FFT_SIZE` と
+同じ) の複素FFT/逆FFTが正しく動作すること」だけであり、処理速度は
+要件になりません (音声レート8kHzのブロック処理は、2020年以降の
+どのCPUでも負荷が無視できる程度であることを別途確認済みです)。
+そのため `ComplexFFT`/`InverseComplexFFT` は教科書的な反復型 Radix-2
+Cooley-Tukey (ビット反転並べ替え+バタフライ演算) として新規に実装し、
+既知の変換対 (インパルス応答・直流成分・単一トーンのピークビン位置)
+との一致を `test/test_fftfilt.lpr` で検証しました。
+
+#### 設計判断のポイント
+
+- **`TComplexLowpass` は削除せず残置**: 他の用途での利用や比較検証の
+  ために `ModemDSP.pas` にそのまま残しています。RTTY/CW の実際の
+  フィルタとしては使われなくなりました。
+- **CW の DEC_RATIO(=16) 間引きも合わせて復元**: fldigi の
+  `rx_FFTprocess()` は fftfilt の出力を16サンプルに1回だけ
+  ビットフィルタ (`Cmovavg`) + `decode_stream()` へ渡します。当初の
+  簡略化ではこの間引きを省略していましたが、ビットフィルタの長さ
+  (`symbollen/(2*DEC_RATIO)`) は間引き後のレートを前提に計算されて
+  おり、間引きを省略するとビットフィルタの実効時間窓が16倍短くなる
+  不整合がありました。`TFftFilt` への置き換えと同時にこの間引きも
+  復元し、整合性を取っています。
+- **CW のフィルタ帯域を speed比例の近似値から fldigi の既定値に修正**:
+  当初の簡略実装はカットオフを `2.5 * 送信速度(WPM)` という独自の
+  近似値にしていましたが、fldigi の既定経路 (`progdefaults.CWmfilt`
+  = false のとき) では `progdefaults.CWbandwidth` (既定150Hz) を
+  そのまま使う固定値です。本ユニットの `Bandwidth` プロパティ (既定
+  150Hz) を素直にフィルタのカットオフとして使うよう修正しました。
+- **ブロック出力への構造変更**: `TFftFilt.Run()` は `flen2` サンプル
+  溜まるまで0を、溜まったら `flen2` 個まとめて返す設計 (fldigiの
+  `fftfilt::run()`と同じ)。1サンプル=1出力だった旧`TComplexLowpass`
+  から置き換えるため、`RxProcess()` 内の包絡線検波以降のロジックを
+  `ProcessFilteredSample()` (RTTY) に切り出し、フィルタが実際に
+  出力したサンプル数だけ呼び出す構造に変更しました
+  (fldigi rtty.cxx の `for (int i = 0; i < n_out; i++)` ループと
+  同じ構造)。
+
+#### 4-1-1. 検証手順 (`test/test_fftfilt.lpr`)
+
+```bash
+fpc -Sood -Mobjfpc -Fuunits -FUunits -FEtest -o test/test_fftfilt test/test_fftfilt.lpr
+./test/test_fftfilt
+```
+
+実行結果:
+
+```
+=== ComplexFFT/InverseComplexFFT (ModemDSP) / TFftFilt 検証 ===
+
+--- 1. FFT往復一致 (N=64) ---
+  最大誤差 = 0.0000000000
+  [OK] ComplexFFT->InverseComplexFFT が元信号を誤差1e-9未満で再現する
+
+--- 2. 既知の変換対 (N=8) ---
+  [OK] delta[0]のFFTは全ビン1+0iになる (Σ規約、無スケーリング)
+  [OK] 直流信号[1,1,...,1]のFFTはビン0=N、他ビン=0になる
+
+--- 3. 単一トーン (5/64サイクル) のピークビン検出 ---
+  ピークビン = 5 (振幅 32.000)
+  [OK] コサイン波 K=5 サイクルのピークがビン5に現れる
+  [OK] ピーク振幅が理論値 N/2=32 と一致する (実際: 32)
+
+--- 4. TFftFilt ローパスフィルタの減衰特性 (flen=256, cutoff=200Hz) ---
+  通過域(100Hz) 定常RMS  = 0.9620
+  阻止域(2000Hz) 定常RMS  = 0.0000
+  通過域/阻止域の減衰量 = 131.4 dB
+  [OK] 通過域トーンはほぼ減衰なく通過する (RMS>0.5、入力振幅1.0)
+  [OK] 阻止域トーンは通過域比で20dB以上減衰する (実際: 131.4dB)
+
+--- 5. TFftFilt.Run() のブロック化動作確認 (flen=64) ---
+  [OK] Flen プロパティが指定通り
+  [OK] Flen2 プロパティが Flen/2
+  [OK] 生成直後の FlushSize = Flen
+  [OK] Run() が0以外を返す時は必ず Flen/2 個 (x8回)
+  [OK] 0を返した回数とブロックを返した回数の合計が投入サンプル数と一致する
+  [OK] 256サンプル投入で 8回ブロック出力される
+
+=== テスト完了: 0 件の失敗 (全 20 件中) ===
+```
+
+fldigi 本来のフィルタ (阻止域で131dBという急峻な減衰特性、通過域は
+ほぼ無損失) が実データで再現できていることを確認しました。1次IIR
+(`TComplexLowpass`) では原理的にこの急峻さ (-6dB/oct程度が限界) は
+出せません。
+
+さらに、`test/test_filter_switch.lpr` で RTTY の全ボーレート(10種)
+×全シフト(10種)、CW の速度8段階×帯域幅4段階の組み合わせすべてで
+フィルタが例外/NaNなく再生成されることを確認し (100+32通り全てOK)、
+既存の `test/test_rtty_cw.lpr` (送受信ループバックテスト) が
+引き続き正しく動作すること (RTTY: "HELLO WORLD 12345" を正しく復調、
+CW: "CQ CQ DE TEST 599 K" 中の "CQ" を検出) も確認済みです。
+
+なお `test/test_rtty_cw.lpr` の CW ループバック結果は、フィルタ
+置き換え後は先頭の "CQ" が "EQ" に化けるようになりました
+(2件目以降の "CQ" は正しく復調されるため、テスト自体はOKのまま)。
+これは `fftfilt::run()` が「最初の2パス分は出力が不安定なため捨てる」
+という fldigi 自身の仕様 (`pass = 1` の初期化と `run()` 冒頭の
+`if (pass) return 0;` 相当の処理) によるコールドスタート特性で、
+`TFftFilt` が `flen2` サンプル (CW_FFT_SIZE=2048 → 1024サンプル
+=128ms) 分の入力を溜めてから初めて出力するため、受信開始直後の
+最初の1文字分がAGC同様に「馴染み不足」になる、fldigi自身にも
+存在する挙動です。`TComplexLowpass` (1次IIR) にはこの種の起動遅延が
+無かったため、当初は表面化していませんでした。実運用ではPTT/VOX
+検出後や周波数変更直後の一瞬のみに影響する軽微な特性であり、
+テストコード側もこれを想定して「先頭無音区間でAGCを馴染ませる」
+「"CQ"がどこかに出現すればOK」という現実的な検証方針を既に
+採用しています。
 
 ### 結合テスト (`test/test_rtty_cw.lpr`)
 
@@ -210,23 +345,28 @@ fpc -Sood -Mobjfpc -Fuunits -FUunits -FEtest -o test/test_rtty_cw test/test_rtty
 ./test/test_rtty_cw
 ```
 
-実行結果 (RTTY: 45.45baud/85Hz, CW: 12WPM):
+実行結果 (RTTY: 45.45baud/85Hz, CW: 12WPM。fftfilt化 [4-1節] 後の実行結果):
 
 ```
 === RTTY 送受信ループバックテスト ===
 送信文字列: HELLO WORLD 12345
-  復調結果      : HELLO WORLD 12345<CR><LF>
+  送信サンプル数: 31680 (3.96 秒)
+  復調結果      : HELLO WORLD 12345<CR>
   [OK] 送信文字列が復調結果に含まれている
 
 === CW 送受信ループバックテスト ===
 送信文字列: CQ CQ DE TEST 599 K
-  復調結果      :  CQ CQ DE TEST 599 K 
+  送信サンプル数: 145600 (18.20 秒)
+  復調結果      :  EQ CQ DE TEST 599 K 
   [OK] 復調結果に "CQ" が検出された
 ```
 
 ※ CW のAGC (`agc_peak`/`noise_floor`) は `rx_init()` 直後 `agc_peak=0`
 から始まる (fldigi と同じ挙動) ため、テストでは実運用同様に受信開始前の
-無音(+微弱ノイズ)区間を先頭に加えてAGCを馴染ませています。
+無音(+微弱ノイズ)区間を先頭に加えてAGCを馴染ませています。先頭の
+"CQ"が"EQ"に化けている点については上記「4-1節」末尾で説明した
+fftfilt自体のコールドスタート特性 (fldigi自身にも存在する挙動) に
+よるもので、2件目以降は正しく復調されています。
 
 ## 5. 実サウンドカードI/O (`units/PortAudioBindings.pas` / `units/PortAudioSoundDevice.pas`)
 

@@ -7,11 +7,26 @@
 
   fldigi との対応 (実装した範囲):
   ----------------------------------------------------------------------------
-  - ミキサー (cw::mixer) + 包絡線検波
-    ※ fldigi 本体は fftfilt (FFT sinc/matched filter) + Cmovavg
-       (ビットフィルタ) を使うが、本移植版は
-       ModemDSP.TComplexLowpass (1次IIR、fftfilt の代替) +
-       ModemDSP.TMovingAverage (Cmovavg そのまま) を使う。
+  - ミキサー (cw::mixer) + fldigi 本来の fftfilt (ModemDSP.TFftFilt。
+    Overlap-Add FFT畳み込みローパス、CW_FFT_SIZE=2048) +
+    ModemDSP.TMovingAverage (Cmovavg そのまま、ビットフィルタ) による
+    包絡線検波。
+    【2026-08 フィルタ品質改善】当初は ModemDSP.TComplexLowpass (1次IIR、
+    カットオフを speed に比例させた簡易近似) で代替していたが、
+    fldigi 本来の fftfilt::create_lpf() を ModemDSP.TFftFilt として
+    移植し、置き換えた。カットオフも fldigi のデフォルト経路
+    (progdefaults.CWmfilt=false のときの bandwidth=progdefaults.
+    CWbandwidth 固定値、既定150Hz) に合わせ、本ユニットの Bandwidth
+    プロパティ (既定150Hz) をそのまま使うよう修正した (speed比例の
+    近似値ではなくなった)。また fldigi の rx_FFTprocess() が行う
+    DEC_RATIO(=16) 間引き (フィルタ出力を16サンプルに1回だけ
+    ビットフィルタ+decode_streamへ渡す) も合わせて再現した
+    (当初省略していたが、bitfilter の長さ (symbollen/(2*DEC_RATIO)) は
+    間引き後のレートを前提に計算されているため、間引きを省略すると
+    ビットフィルタの実効時間窓が16倍短くなってしまう不整合があった)。
+    CWmfilt (speedに応じて自動的に帯域を変える "整合フィルタ" モード、
+    既定offのため優先度低)・rttyの矩形波整形のようなSymbolShaperは
+    未実装のまま。
   - decode_stream(): AGC(自動利得制御)/ノイズフロア追跡付きの
     ヒステリシス検出 (upper/lower threshold) をそのまま移植
   - handle_event(): CW_RESET/KEYDOWN/KEYUP/QUERY の4イベントに対する
@@ -53,6 +68,8 @@ const
   CW_INITIAL_SEND_SPEED = 18;         // fldigi: #define INITIAL_SEND_SPEED 18
   CW_TRACKING_FILTER_SIZE = 16;       // fldigi: #define TRACKING_FILTER_SIZE 16
   CW_MAX_MORSE_ELEMENTS = 6;          // fldigi: #define MAX_MORSE_ELEMENTS 6
+  CW_FFT_SIZE = 2048;                 // fldigi: #define CW_FFT_SIZE 2048 (cw.cxx)
+  CW_DEC_RATIO = 16;                  // fldigi: #define DEC_RATIO 16 (cw.cxx)
 
 type
   { fldigi: enum CW_RX_STATE - RS_IDLE, RS_IN_TONE, RS_AFTER_TONE }
@@ -118,7 +135,8 @@ type
 
     FTrackingFilter: TMovingAverage; // fldigi: Cmovavg *trackingfilter
     FBitFilter: TMovingAverage;      // fldigi: Cmovavg *bitfilter
-    FMixerFilt: TComplexLowpass;     // fldigi: fftfilt *cw_FFT_filter (簡略化)
+    FMixerFilt: TFftFilt;            // fldigi: fftfilt *cw_FFT_filter
+    FFiltBandwidth: Double;          // 直近にフィルタ生成に使った Bandwidth (変更検出用)
     FCwTrackOn: Boolean;             // fldigi: cwTrack (基底クラスの CwTrack と同期)
 
     // --- decode_stream 用の AGC / しきい値状態 ---
@@ -227,11 +245,17 @@ begin
 
   Bandwidth := 150; // fldigi 既定: progdefaults.CWbandwidth = 150
 
-  Bfv := FSymbolLen div (2 * 16); // fldigi: symbollen/(2*DEC_RATIO), DEC_RATIO=16
+  Bfv := FSymbolLen div (2 * CW_DEC_RATIO); // fldigi: symbollen/(2*DEC_RATIO)
   if Bfv < 1 then Bfv := 1;
   FBitFilter := TMovingAverage.Create(Bfv);
   FTrackingFilter := TMovingAverage.Create(CW_TRACKING_FILTER_SIZE);
-  FMixerFilt := TComplexLowpass.Create(2.5 * FCwSpeed, SampleRate); // 帯域 ~ CWbandwidth相当
+
+  // fldigi: cw_FFT_filter = new fftfilt(1.0*bandwidth/samplerate, CW_FFT_SIZE);
+  //         cw_FFT_filter->create_lpf(...) は reset_rx_filter() 内でも呼ばれる
+  //         (Bandwidth 変更時は RxProcess 先頭で再生成する。下記参照)
+  FMixerFilt := TFftFilt.Create(CW_FFT_SIZE);
+  FMixerFilt.CreateLpf(Bandwidth / SampleRate);
+  FFiltBandwidth := Bandwidth;
 
   FCwTrackOn := True;
   CwTrack := True; // 基底クラスのプロパティにも反映 (fldigi: cwTrack = true;)
@@ -639,28 +663,42 @@ begin
 end;
 
 function TCwModem.RxProcess(const ABuf: array of Double; ALen: Integer): Integer;
+{ fldigi: int cw::rx_process(const double *buf, int len)
+    -> reset_rx_filter() (帯域変更時のフィルタ再生成)
+    -> rx_FFTprocess() (fftfilt + DEC_RATIO間引き) }
 var
-  i: Integer;
+  i, j, nOut: Integer;
   Z: TComplex;
+  FiltOut: TComplexArray;
   Value: Double;
 begin
-  // fldigi: int cw::rx_process(const double *buf, int len)
-  //   -> rx_FFTprocess() (フィルタ + DEC_RATIO間引き) を単純化し、
-  //      1サンプル毎にミキサー+ローパスフィルタ+移動平均フィルタで
-  //      包絡線を求め、そのまま decode_stream() へ渡す
-  //      (間引き無しなので smpl_ctr は 1サンプル=1 として進める)
+  // fldigi: reset_rx_filter() (CWmfilt="整合フィルタ"モードは未実装のため、
+  // Bandwidth プロパティの変更のみを検出条件とする)
+  if Bandwidth <> FFiltBandwidth then
+  begin
+    FMixerFilt.Free;
+    FMixerFilt := TFftFilt.Create(CW_FFT_SIZE);
+    FMixerFilt.CreateLpf(Bandwidth / SampleRate);
+    FFiltBandwidth := Bandwidth;
+  end;
+
   for i := 0 to ALen - 1 do
   begin
     Z := CplxMake(ABuf[i], ABuf[i]);
     Z := Mixer(Z);
-    Z := FMixerFilt.Run(Z);
+    nOut := FMixerFilt.Run(Z, FiltOut);
 
-    Inc(FSmplCtr);
+    for j := 0 to nOut - 1 do
+    begin
+      Inc(FSmplCtr);
+      // fldigi: if (smpl_ctr % DEC_RATIO) continue;
+      if FSmplCtr mod CW_DEC_RATIO <> 0 then Continue;
 
-    Value := CplxAbs(Z);
-    Value := FBitFilter.Run(Value);
+      Value := CplxAbs(FiltOut[j]);
+      Value := FBitFilter.Run(Value);
 
-    DecodeStream(Value);
+      DecodeStream(Value);
+    end;
   end;
   Result := 0;
 end;

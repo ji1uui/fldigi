@@ -10,6 +10,8 @@ test/test_portaudio
 test/test_rigcontrol
 test/test_station_adif
 test/test_contestlog
+test/test_fftfilt
+test/test_filter_switch
 forms/DemoModemApp
 *.res
 backup/
