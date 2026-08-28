@@ -42,6 +42,12 @@ type
   TStringList を経由しないため、改行コードの正規化も末尾改行の付与も
   起こらない。ADIF のような長さ指定書式の解析に使う。
   ファイルが存在しない場合は空文字を返す (例外は投げない)。 }
+const
+  { テキストとして一括読み込みする上限 (256 MiB)。
+    これを超えるのは設定やログの取り違えであり、読めないことより
+    メモリを食い潰す方が害が大きい。 }
+  MAX_TEXT_FILE_BYTES = Int64(256) * 1024 * 1024;
+
 function LoadTextRaw(const AFileName: string): string;
 
 { 内容を原子的に保存する。
@@ -65,10 +71,15 @@ begin
   try
     n := fs.Size;
     if n <= 0 then Exit;
-    { SizeInt を超える巨大ファイルは扱わない (32bit 環境での安全策) }
-    if n > High(SizeInt) then
+    { 巨大ファイルは扱わない。以前は High(SizeInt) と比較していたが、
+      64bit では SizeInt が Int64 なので条件が常に偽になり、
+      検査として機能していなかった (コンパイラも到達不能と警告する)。
+      本ユニットが扱うのは設定・ログ・ADIF といったテキストなので、
+      現実的な上限を明示する方が意味がある。 }
+    if n > MAX_TEXT_FILE_BYTES then
       raise ESafeFileIOError.CreateFmt(
-        'ファイルが大きすぎます (%d バイト): %s', [n, AFileName]);
+        'ファイルが大きすぎます (%d バイト / 上限 %d バイト): %s',
+        [n, MAX_TEXT_FILE_BYTES, AFileName]);
     SetLength(Result, SizeInt(n));
     fs.ReadBuffer(Result[1], SizeInt(n));
   finally
