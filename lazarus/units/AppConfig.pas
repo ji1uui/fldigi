@@ -66,7 +66,7 @@ unit AppConfig;
 interface
 
 uses
-  Classes, SysUtils, fpjson, jsonparser, Generics.Collections;
+  Classes, SysUtils, fpjson, jsonparser, Generics.Collections, SafeFileIO;
 
 type
   { PTT (送信制御) の方式。fldigi: progdefaults の RTSptt / DTRptt /
@@ -323,6 +323,9 @@ end;
 
 function TMachineConfig.InterfaceAt(AIndex: Integer): TInterfaceSetup;
 begin
+  if (AIndex < 0) or (AIndex >= FInterfaces.Count) then
+    raise EAppConfigError.CreateFmt(
+      '接続設定の番号が範囲外です: %d (件数 %d)', [AIndex, FInterfaces.Count]);
   Result := FInterfaces[AIndex];
 end;
 
@@ -398,6 +401,9 @@ end;
 
 function TAppConfig.MachineAt(AIndex: Integer): TMachineConfig;
 begin
+  if (AIndex < 0) or (AIndex >= FMachines.Count) then
+    raise EAppConfigError.CreateFmt(
+      'マシン設定の番号が範囲外です: %d (件数 %d)', [AIndex, FMachines.Count]);
   Result := FMachines[AIndex];
 end;
 
@@ -451,7 +457,10 @@ begin
   begin
     o := TJSONObject(d);
     for i := 0 to o.Count - 1 do
-      m.BindProfile(o.Names[i], o.Items[i].AsString);
+      { 手編集された JSON で値が文字列以外 (数値・null 等) になっていても
+        AsString が例外を投げて読込全体が失敗しないよう、型を確認する。 }
+      if o.Items[i].JSONType = jtString then
+        m.BindProfile(o.Names[i], o.Items[i].AsString);
   end;
 
   d := AObj.Find('session');
@@ -554,7 +563,6 @@ end;
 procedure TAppConfig.SaveToFile(const AFileName: string);
 var
   root, machines: TJSONObject;
-  sl: TStringList;
   i: Integer;
 begin
   root := TJSONObject.Create;
@@ -565,13 +573,8 @@ begin
       machines.Add(FMachines[i].MachineId, MachineToJson(FMachines[i]));
     root.Add(KEY_MACHINES, machines);
 
-    sl := TStringList.Create;
-    try
-      sl.Text := root.FormatJSON;
-      sl.SaveToFile(AFileName);
-    finally
-      sl.Free;
-    end;
+    { 一時ファイル + rename による原子的保存 (SafeFileIO 参照)。 }
+    SaveTextAtomic(AFileName, root.FormatJSON);
   finally
     root.Free;
   end;

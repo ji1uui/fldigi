@@ -44,7 +44,7 @@ unit StationInfo;
 interface
 
 uses
-  Classes, SysUtils, fpjson, jsonparser;
+  Classes, SysUtils, fpjson, jsonparser, SafeFileIO;
 
 type
   { TStationInfo
@@ -167,7 +167,6 @@ end;
 procedure TStationInfo.SaveToFile(const AFileName: string);
 var
   obj: TJSONObject;
-  sl: TStringList;
 begin
   obj := TJSONObject.Create;
   try
@@ -178,13 +177,9 @@ begin
     obj.Add(KEY_MY_LOCATOR, FMyLocator);
     obj.Add(KEY_MY_ANTENNA, FMyAntenna);
 
-    sl := TStringList.Create;
-    try
-      sl.Text := obj.FormatJSON;
-      sl.SaveToFile(AFileName);
-    finally
-      sl.Free;
-    end;
+    { 一時ファイル + rename による原子的保存 (SafeFileIO 参照)。
+      書き込み途中で電源が落ちても局情報が消えない。 }
+    SaveTextAtomic(AFileName, obj.FormatJSON);
   finally
     obj.Free;
   end;

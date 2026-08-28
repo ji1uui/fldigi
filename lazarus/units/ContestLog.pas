@@ -367,6 +367,9 @@ type
     Value: string;
   end;
 
+  { コンテストログの操作エラー (添字の範囲外など)。 }
+  EContestLogError = class(Exception);
+
   { TContestLog
     ---------------------------------------------------------------------
     fldigi に直接対応するクラスは無い (設計方針1参照)。交換ナンバーの
@@ -378,6 +381,7 @@ type
     FDefinition: TContestDefinition; // 参照のみ (Registry等が所有権を持つ)
     FDxcc: TDxccDatabase;         // 参照のみ。nil なら国名/ゾーン自動補完なし
     FNextSerial: Integer;
+    FLastSaveError: string;
   public
     constructor Create;
     destructor Destroy; override;
@@ -419,7 +423,13 @@ type
       const AExchange: array of TContestFieldValue; AAssignSerial: Boolean;
       out ADupe: Boolean): TAdifRecord;
 
+    { ADIF ファイルへ保存する。成功したら True を返す。
+      失敗理由が必要な場合は out 引数付きの版を使う。 }
     function SaveToAdif(const AFileName: string): Boolean;
+    function SaveToAdif(const AFileName: string; out AErrorMessage: string): Boolean;
+    { 直近の SaveToAdif が失敗した理由 (成功時は空文字)。 }
+    property LastSaveError: string read FLastSaveError;
+
     function LoadFromAdif(const AFileName: string): Integer;
   end;
 
@@ -643,6 +653,9 @@ end;
 
 function TCountyDatabase.GetEntry(AIndex: Integer): TCountyEntry;
 begin
+  if (AIndex < 0) or (AIndex >= Length(FEntries)) then
+    raise EContestLogError.CreateFmt(
+      '郡データの番号が範囲外です: %d (件数 %d)', [AIndex, Length(FEntries)]);
   Result := FEntries[AIndex];
 end;
 
@@ -819,6 +832,9 @@ end;
 
 function TContestDefinition.GetField(AIndex: Integer): TContestExchangeField;
 begin
+  if (AIndex < 0) or (AIndex >= Length(FFields)) then
+    raise EContestLogError.CreateFmt(
+      '交換フィールドの番号が範囲外です: %d (項目数 %d)', [AIndex, Length(FFields)]);
   Result := FFields[AIndex];
 end;
 
@@ -864,6 +880,9 @@ end;
 
 function TContestRegistry.Definition(AIndex: Integer): TContestDefinition;
 begin
+  if (AIndex < 0) or (AIndex >= FDefinitions.Count) then
+    raise EContestLogError.CreateFmt(
+      'コンテスト定義の番号が範囲外です: %d (件数 %d)', [AIndex, FDefinitions.Count]);
   Result := FDefinitions[AIndex];
 end;
 
@@ -1112,9 +1131,29 @@ begin
 end;
 
 function TContestLog.SaveToAdif(const AFileName: string): Boolean;
+{ 保存の成否を正直に返す。以前は無条件に True を返しており、書き込みに
+  失敗しても呼び出し側が戻り値からは気付けなかった (例外が素通りするか、
+  成功したように見えるかのどちらかで、扱いが一貫しなかった)。
+  実運用では書き込み権限・ディスク残量・USB メモリの抜去といった失敗が
+  現実に起こるため、戻り値だけで判定できるようにする。 }
 begin
-  FDatabase.SaveToFile(AFileName);
-  Result := True;
+  Result := SaveToAdif(AFileName, FLastSaveError);
+end;
+
+function TContestLog.SaveToAdif(const AFileName: string;
+  out AErrorMessage: string): Boolean;
+begin
+  AErrorMessage := '';
+  try
+    FDatabase.SaveToFile(AFileName);
+    Result := True;
+  except
+    on E: Exception do
+    begin
+      AErrorMessage := E.Message;
+      Result := False;
+    end;
+  end;
 end;
 
 function TContestLog.LoadFromAdif(const AFileName: string): Integer;

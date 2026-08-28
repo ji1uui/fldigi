@@ -73,6 +73,9 @@ function ClampF(AValue, AMin, AMax: Double): Double;
 function Sinc(AX: Double): Double;
 
 type
+  { DSP パラメータの誤りを表す例外 (FFT長が2の冪乗でない等)。 }
+  EDspError = class(Exception);
+
   TComplexArray = array of TComplex;
 
 { fldigi: g_fft<double>::ComplexFFT(cmplx *buf)
@@ -267,6 +270,13 @@ end;
   2の冪乗であることが前提 (呼び出し元の TFftFilt が保証する)。
   ============================================================================ }
 
+{ N が 2 の冪乗かどうか。Radix-2 FFT は 2 の冪乗長でしか正しく動作しない
+  ため、誤った長さで「静かに間違った結果」を返さないよう検査に使う。 }
+function IsPowerOfTwo(AN: Integer): Boolean;
+begin
+  Result := (AN >= 2) and ((AN and (AN - 1)) = 0);
+end;
+
 procedure BitReverseInPlace(var ABuf: TComplexArray);
 var
   n, i, j, bit: Integer;
@@ -328,6 +338,9 @@ end;
 
 procedure ComplexFFT(var ABuf: TComplexArray);
 begin
+  if not IsPowerOfTwo(Length(ABuf)) then
+    raise EDspError.CreateFmt(
+      'FFT長は2以上の2の冪乗である必要があります (指定: %d)', [Length(ABuf)]);
   FftButterflyCore(ABuf, -1.0);
 end;
 
@@ -336,6 +349,9 @@ var
   i, n: Integer;
   invN: Double;
 begin
+  if not IsPowerOfTwo(Length(ABuf)) then
+    raise EDspError.CreateFmt(
+      'FFT長は2以上の2の冪乗である必要があります (指定: %d)', [Length(ABuf)]);
   FftButterflyCore(ABuf, 1.0);
   n := Length(ABuf);
   if n > 0 then
@@ -437,6 +453,12 @@ end;
 constructor TFftFilt.Create(ALen: Integer);
 begin
   inherited Create;
+  { Overlap-Add は内部で Radix-2 FFT を使うため、長さが 2 の冪乗でないと
+    黙って誤ったフィルタ出力を返してしまう。生成時点で弾く。
+    最小 4 = flen2 が 2 以上 (1 ブロックに複数サンプルが入る) を保証する。 }
+  if not IsPowerOfTwo(ALen) or (ALen < 4) then
+    raise EDspError.CreateFmt(
+      'フィルタ長は4以上の2の冪乗である必要があります (指定: %d)', [ALen]);
   FFlen := ALen;
   FFlen2 := ALen div 2;
   SetLength(FFilter, FFlen);
@@ -544,7 +566,7 @@ procedure TFftFilt.RttyFilter(AF: Double);
   時間領域のインパルス応答をFFTする create_filter() とは異なり、
   こちらは最初から H(w) (FFilter配列) を直接書き込む。 }
 var
-  f, x, dht: Double;
+  f, x, dht, sincVal: Double;
   i: Integer;
 begin
   ClearFilter;
@@ -562,8 +584,17 @@ begin
       dht := Cos((Pi * x) / (f * 4.0));
     dht := dht * dht; // cos^2
 
-    // amplitude equalized nyquist-channel response
-    dht := dht / Sinc(2.0 * i * f);
+    { 振幅等化 (amplitude equalized nyquist-channel response)。
+      Sinc(x) は x が 0 以外の整数のとき 0 になるため、そのまま割ると
+      Inf/NaN がフィルタ係数に混入し、以後の復調出力すべてが NaN に
+      汚染される。通常のパラメータ範囲では dht が先に 0 になるため
+      到達しないが、パラメータ次第で 0/0 = NaN もあり得るので明示的に
+      保護する。 }
+    sincVal := Sinc(2.0 * i * f);
+    if Abs(sincVal) < 1e-12 then
+      dht := 0.0
+    else
+      dht := dht / sincVal;
 
     FFilter[i] := CplxMake(dht * Cos(-0.5 * Pi * i), dht * Sin(-0.5 * Pi * i));
     FFilter[(FFlen - i) mod FFlen] := CplxMake(dht * Cos(0.5 * Pi * i), dht * Sin(0.5 * Pi * i));

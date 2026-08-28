@@ -116,7 +116,8 @@ unit OpProfile;
 interface
 
 uses
-  Classes, SysUtils, fpjson, jsonparser, Generics.Collections, StationInfo;
+  Classes, SysUtils, fpjson, jsonparser, Generics.Collections, StationInfo,
+  SafeFileIO;
 
 type
   { 運用形態 (軸 6)。
@@ -589,11 +590,45 @@ function TProfileRegistry.SiteCount: Integer;      begin Result := FSites.Count;
 function TProfileRegistry.EquipmentCount: Integer; begin Result := FEquipment.Count; end;
 function TProfileRegistry.ProfileCount: Integer;   begin Result := FProfiles.Count;  end;
 
-function TProfileRegistry.Station(AIndex: Integer): TStationIdentity;  begin Result := FStations[AIndex];  end;
-function TProfileRegistry.OperatorAt(AIndex: Integer): TOperatorInfo;  begin Result := FOperators[AIndex]; end;
-function TProfileRegistry.Site(AIndex: Integer): TOperatingSite;       begin Result := FSites[AIndex];     end;
-function TProfileRegistry.Equipment(AIndex: Integer): TEquipmentSet;   begin Result := FEquipment[AIndex]; end;
-function TProfileRegistry.Profile(AIndex: Integer): TOperatingProfile; begin Result := FProfiles[AIndex];  end;
+{ 添字アクセサはいずれも範囲を検査する。範囲外をアクセス違反にすると
+  「どの軸の何番目で落ちたか」が分からず原因究明が困難になるため、
+  軸名と件数を含む例外にする。 }
+procedure CheckAxisIndex(AIndex, ACount: Integer; const AAxisName: string);
+begin
+  if (AIndex < 0) or (AIndex >= ACount) then
+    raise EOpProfileError.CreateFmt(
+      '%sの番号が範囲外です: %d (件数 %d)', [AAxisName, AIndex, ACount]);
+end;
+
+function TProfileRegistry.Station(AIndex: Integer): TStationIdentity;
+begin
+  CheckAxisIndex(AIndex, FStations.Count, '局');
+  Result := FStations[AIndex];
+end;
+
+function TProfileRegistry.OperatorAt(AIndex: Integer): TOperatorInfo;
+begin
+  CheckAxisIndex(AIndex, FOperators.Count, '運用者');
+  Result := FOperators[AIndex];
+end;
+
+function TProfileRegistry.Site(AIndex: Integer): TOperatingSite;
+begin
+  CheckAxisIndex(AIndex, FSites.Count, '運用地');
+  Result := FSites[AIndex];
+end;
+
+function TProfileRegistry.Equipment(AIndex: Integer): TEquipmentSet;
+begin
+  CheckAxisIndex(AIndex, FEquipment.Count, '設備');
+  Result := FEquipment[AIndex];
+end;
+
+function TProfileRegistry.Profile(AIndex: Integer): TOperatingProfile;
+begin
+  CheckAxisIndex(AIndex, FProfiles.Count, 'プロファイル');
+  Result := FProfiles[AIndex];
+end;
 
 function TProfileRegistry.RenameStation(const AOldName, ANewName: string): Boolean;
 var
@@ -962,7 +997,6 @@ var
   root: TJSONObject;
   arr: TJSONArray;
   o: TJSONObject;
-  sl: TStringList;
   i: Integer;
 begin
   root := TJSONObject.Create;
@@ -1047,13 +1081,9 @@ begin
     end;
     root.Add(KEY_PROFILES, arr);
 
-    sl := TStringList.Create;
-    try
-      sl.Text := root.FormatJSON;
-      sl.SaveToFile(AFileName);
-    finally
-      sl.Free;
-    end;
+    { 一時ファイル + rename による原子的保存。書き込み途中で電源が
+      落ちても、保存先は更新前か更新後のどちらか完全な内容になる。 }
+    SaveTextAtomic(AFileName, root.FormatJSON);
   finally
     root.Free;
   end;

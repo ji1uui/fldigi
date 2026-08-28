@@ -13,6 +13,10 @@ test/test_contestlog
 test/test_fftfilt
 test/test_filter_switch
 test/test_opprofile
+test/test_robustness
 forms/DemoModemApp
 *.res
+# SafeFileIO の一時ファイル (異常終了時のみ残りうる)
+*.json.tmp
+*.adi.tmp
 backup/

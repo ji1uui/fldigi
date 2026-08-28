@@ -36,7 +36,8 @@ lazarus/
 │   ├── DxccDatabase.pas          cty.dat解析・DXCC/ゾーン判定 (fldigi: dxcc.cxx)
 │   ├── ContestLog.pas            コンテストロギング (fldigi: contest.cxx/counties.cxx)
 │   ├── OpProfile.pas             運用プロファイル (局/運用者/運用地/設備/形態の5軸)
-│   └── AppConfig.pas             PC固有設定(接続軸)・セッション状態
+│   ├── AppConfig.pas             PC固有設定(接続軸)・セッション状態
+│   └── SafeFileIO.pas            原子的なファイル保存・生バイト読込の共通ヘルパー
 ├── forms/                  -- LCL (GUI) を使った実装例
 │   ├── UnitMainForm.pas    TForm 継承のメインフォーム実装例
 │   ├── DemoModemApp.lpr    デモアプリのエントリポイント
@@ -50,7 +51,8 @@ lazarus/
     ├── test_rigcontrol.lpr   Hamlib CAT制御の動作確認テスト (疑似CAT通信)
     ├── test_station_adif.lpr 局情報記憶/ADIF-UDP送信/内蔵ロギングの動作確認テスト
     ├── test_contestlog.lpr   コンテストロギング/DXCC・ゾーン判定の動作確認テスト
-    └── test_opprofile.lpr    運用プロファイル/PC固有設定の動作確認テスト
+    ├── test_opprofile.lpr    運用プロファイル/PC固有設定の動作確認テスト
+    └── test_robustness.lpr   堅牢性・品質改善の回帰テスト
 ```
 
 ## 1. モデムエンジン設計 (`TCustomModem` / `TModemEngine`)
@@ -1318,3 +1320,98 @@ FPC の `string` は `AnsiString(CP_ACP)` であり、Unix では `CP_ACP` の�
   `TResolvedStation` までは解決されるが、`AdifUdpSender` はまだ
   これらのタグを出力しない (`TStationInfo` に対応する項目が無いため)。
   ADIF出力への反映は `AdifFile.pas` 経由のロギングと合わせて行う。
+
+## 10. 堅牢性・ソフトウェア品質の監査と修正
+
+GUI を除くコアユニット全体を、コンパイルエラー以外の観点 (実行時に初めて
+壊れる不具合・性能・エラー処理の誠実さ) で監査し、見つかった問題をすべて
+修正した。回帰テストは `test/test_robustness.lpr` (全36件)。
+
+### 10-1. ADIF 入出力の不具合 (`AdifFile.pas`)
+
+**(a) 値に改行を含むフィールドで以降が全部ずれる**
+ADIF は `<CALL:4>W1AW` のように長さを**バイト数で前置**する書式である。
+読み込みに `TStringList.LoadFromFile` + `.Text` を使っていたため改行コードが
+正規化され (CRLF→LF)、値に改行を含むフィールド (ADIF が許容する
+NOTES/COMMENT など) があると長さと実バイト数がずれ、**そのレコードの
+以降のフィールドをすべて誤って切り出していた**。
+生バイトで読む `SafeFileIO.LoadTextRaw` に変更し、書き出し側も
+`TStringList.SaveToFile` を経由しない対称な経路にした。
+
+**(b) 大量ログの読み込みが二次オーダー**
+大小無視の検索ヘルパーが**呼び出しのたびにバッファ全体を `LowerCase`**
+していた。この検索はレコードごとに実行されるため、レコード数 × ファイル全体
+という O(n²) になっていた。小文字版を最初に1回だけ作る方式へ変更。
+
+検索部分だけを取り出した実測 (3000レコード / 375KB):
+
+| 方式 | 所要時間 |
+|---|---|
+| 修正前 (毎回バッファ全体を小文字化) | **3691 ms** |
+| 修正後 (1回だけ小文字化) | **2 ms** |
+
+約1800倍の差で、しかも二次オーダーなので件数が増えるほど開く。
+実ファイルの読み込み全体でも 3000 レコードが 10 ms で完了するようになった。
+
+**(c) 値に `<` を含むとタグと誤認する**
+フィールド解析後に「次の `<`」へ飛んでいたため、値の中の `<` をタグの開始と
+誤認していた。長さ分を確実に読み飛ばしてから次のタグを探す方式へ変更。
+
+**(d) 同一内容の if/else 分岐 (デッドコード)**
+`SaveToFile` に `if fld = afFreq then ... else ...` があったが両分岐が
+完全に同一だった。値は格納時点で既に ADIF 準拠なので分岐ごと削除。
+
+### 10-2. 保存の非アトミック性 (`SafeFileIO.pas` を新設)
+
+設定・ログの保存が `TStringList.SaveToFile(AFileName)` で保存先を直接開いて
+上書きする方式だった。この方式では「ファイルを開いて切り詰めた直後・書き込み
+完了前」に電源断やクラッシュが起きると、**保存先が空または途中までの内容に
+なり、それまでの設定やログが失われる**。
+
+本アプリは実行ファイルと同じディレクトリに設定を置く = USB メモリで持ち運び、
+**バッテリー運用の移動運用先でも使う**想定なので、書き込み中の電源断は
+現実に起こりうる。共通ヘルパー `SafeFileIO.SaveTextAtomic` を新設し、
+「一時ファイルへ書き切ってから rename で置き換える」方式に統一した。
+rename は POSIX では原子的操作なので、どの瞬間に電源が落ちても保存先は
+「更新前の完全な内容」か「更新後の完全な内容」のどちらかになる。
+
+適用先: `StationInfo` / `QsoLogbook` / `OpProfile` / `AppConfig` / `AdifFile`。
+
+### 10-3. エラー処理の誠実さ
+
+- **`TContestLog.SaveToAdif` が常に True を返していた**。書き込み権限・
+  ディスク残量・USB メモリの抜去といった実運用で起こりうる失敗を、
+  呼び出し側が戻り値から判別できなかった。例外を捕捉して False を返し、
+  理由を `LastSaveError` と `out` 引数で取得できるようにした。
+- **添字アクセサに範囲検査が無かった** (`TAdifDatabase` / `TQsoLogbook` /
+  `TProfileRegistry` / `TAppConfig` / `TDxccDatabase` / `TContestRegistry` /
+  `TCountyDatabase` / `TContestDefinition`)。範囲外はアクセス違反になり、
+  どこで何番目を触って落ちたのか分からなかった。対象名と件数を含む
+  専用例外に変更した。
+- **手編集で壊れた JSON への耐性**。`machine_config.json` の
+  `profileBindings` の値が文字列以外 (数値等) になっていると `AsString` が
+  例外を投げ、**そのマシンの設定全体が読めなくなっていた**。型を確認して
+  不正な項目だけを読み飛ばすようにした。
+
+### 10-4. DSP の数値安全性 (`ModemDSP.pas`)
+
+- **FFT 長の検証が無かった**。`ComplexFFT` / `TFftFilt` は Radix-2 実装なので
+  2の冪乗長でしか正しく動かないが、それ以外を渡すと例外も出さず
+  **静かに誤った結果**を返していた。生成・実行時に検査して `EDspError` を
+  送出するようにした。
+- **`RttyFilter` の除算で NaN/Inf が混入しうる**。振幅等化の
+  `dht / Sinc(2*i*f)` は `Sinc` が 0 になりうる (引数が 0 以外の整数のとき)。
+  現行パラメータでは先に `dht` が 0 になるため到達しないが、`0/0 = NaN` の
+  可能性が残る。**一度でも NaN が係数に入ると以降の復調出力すべてが NaN に
+  汚染される**ため、明示的に保護した。回帰テストで実際にサンプルを流し、
+  出力に NaN/Inf が現れないことを確認している。
+
+### 10-5. 監査したが問題が無かった箇所
+
+- `TMovingAverage.SetLength_` の縮小時: `FEmpty := True` により次回 `Run` で
+  `FPtr` が 0 に戻るため、範囲外アクセスは起きない。
+- `DxccDatabase` の所有権: `FPrefixMap` の値は借用参照で、実体は
+  `FBaseEntities` / `FExceptionEntities` が `OwnsObjects=True` で所有。
+  `Clear` はマップを先に空にしてから実体を解放しており順序も正しい。
+- `TRttyModem` の `FBitBuf`: 最大シンボル長 (8000/45≒177) が確保サイズ
+  (`RTTY_MAXBITS`=696) を超えないため溢れない。
