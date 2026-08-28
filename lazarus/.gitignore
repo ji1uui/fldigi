@@ -1,0 +1,10 @@
+# コンパイル生成物は除外
+*.o
+*.ppu
+*.or
+*.compiled
+lib/
+test/test_modem
+forms/DemoModemApp
+*.res
+backup/
