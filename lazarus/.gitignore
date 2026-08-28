@@ -5,6 +5,8 @@
 *.compiled
 lib/
 test/test_modem
+test/test_rtty_cw
+test/test_portaudio
 forms/DemoModemApp
 *.res
 backup/
