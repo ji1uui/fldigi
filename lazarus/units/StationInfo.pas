@@ -1,0 +1,203 @@
+{ ============================================================================
+  StationInfo.pas
+
+  局情報 (コールサイン/オペレータ名/運用地/グリッドロケータ/アンテナ等) を
+  保持し、実行ファイルと同じディレクトリに JSON ファイルとして永続化する。
+
+  fldigi との対応:
+    fldigi (C++)                              | Lazarus (Pascal)
+    --------------------------------------------+-------------------------
+    progdefaults (configuration.h の ELEM_ マクロ) | TStationInfo (本ユニット)
+    progdefaults.myCall    (MYCALL)             | MyCall
+    progdefaults.operCall  (OPERCALL)           | OperCall
+    progdefaults.myName    (MYNAME)             | MyName
+    progdefaults.myQth     (MYQTH)              | MyQth
+    progdefaults.myLocator (MYLOC)              | MyLocator
+    progdefaults.myAntenna (MYANTENNA)          | MyAntenna
+    fldigi_def.xml への保存 (INI/XML形式)        | JSON形式での保存 (本ユニット)
+
+  設計方針:
+  ----------------------------------------------------------------------------
+  1. fldigi は設定全体を XML (実体は INI 相当のキー/値集合、
+     `$HOME/.fldigi/fldigi_def.xml`) に保存するが、本移植版では
+     ユーザー要望により「実行ファイルと同じディレクトリ」に
+     「各OSで標準的な構造化フォーマット」= JSON で保存する
+     (FPC 標準の fpjson/jsonparser ユニットのみで実装でき、
+     追加の外部ライブラリ依存が不要なため)。
+
+  2. ADIF タグ名との対応も本ユニットの責務ではなく、AdifUdpSender.pas /
+     QsoLogRecord.pas 側で TStationInfo のプロパティを参照して
+     STATION_CALLSIGN / OPERATOR / MY_GRIDSQUARE / MY_CITY / MY_ANTENNA
+     等の ADIF フィールドへ変換する (fldigi の logsupport.cxx
+     AddRecord() が progdefaults.myCall 等を QSO レコードへコピーする
+     処理に相当)。
+
+  3. Strategy パターンとの整合: 本クラスは GUI/永続化フォーマットに
+     依存する具体的な処理を持つが、他ユニット (RigControlIntf 等) と
+     同様 GUI (LCL) には一切依存しないため、コンソールのみの環境でも
+     単体テスト可能。
+  ============================================================================ }
+unit StationInfo;
+
+{$mode objfpc}{$H+}
+
+interface
+
+uses
+  Classes, SysUtils, fpjson, jsonparser;
+
+type
+  { TStationInfo
+    ---------------------------------------------------------------------
+    fldigi: progdefaults の Operator/Station 情報部分 }
+  TStationInfo = class
+  private
+    FMyCall: string;      // 自局コールサイン    (fldigi: myCall    / ADIF: STATION_CALLSIGN)
+    FOperCall: string;    // 運用者コールサイン  (fldigi: operCall  / ADIF: OPERATOR)
+    FMyName: string;      // 運用者名            (fldigi: myName)
+    FMyQth: string;       // 運用地 (QTH)        (fldigi: myQth     / ADIF: MY_CITY)
+    FMyLocator: string;   // グリッドロケータ    (fldigi: myLocator / ADIF: MY_GRIDSQUARE)
+    FMyAntenna: string;   // アンテナ情報        (fldigi: myAntenna / ADIF: MY_ANTENNA)
+  public
+    constructor Create;
+
+    { 実行ファイルと同じディレクトリの既定ファイル名
+      (station_info.json) の絶対パスを返す。 }
+    class function DefaultFilePath: string;
+
+    { AFileName で指定した JSON ファイルから読み込む。
+      ファイルが存在しない場合は何もしない (全フィールド既定値=空文字)。
+      不正な JSON の場合は EStationInfoError を送出する。 }
+    procedure LoadFromFile(const AFileName: string);
+
+    { AFileName で指定した JSON ファイルへ保存する
+      (人間が読みやすいよう整形済み JSON で出力する)。 }
+    procedure SaveToFile(const AFileName: string);
+
+    { DefaultFilePath() に対する Load/Save の簡易ラッパー。
+      ファイルが存在しない場合、LoadDefault は何もしない
+      (初回起動時は全フィールド空文字のまま)。 }
+    procedure LoadDefault;
+    procedure SaveDefault;
+
+    property MyCall: string read FMyCall write FMyCall;
+    property OperCall: string read FOperCall write FOperCall;
+    property MyName: string read FMyName write FMyName;
+    property MyQth: string read FMyQth write FMyQth;
+    property MyLocator: string read FMyLocator write FMyLocator;
+    property MyAntenna: string read FMyAntenna write FMyAntenna;
+  end;
+
+  EStationInfoError = class(Exception);
+
+implementation
+
+const
+  { fldigi の MYCALL/MYQTH/MYNAME/MYLOC/MYANTENNA/OPERCALL という
+    INI キー名の役割を果たす JSON キー名。 }
+  KEY_MY_CALL    = 'myCall';
+  KEY_OPER_CALL  = 'operCall';
+  KEY_MY_NAME    = 'myName';
+  KEY_MY_QTH     = 'myQth';
+  KEY_MY_LOCATOR = 'myLocator';
+  KEY_MY_ANTENNA = 'myAntenna';
+
+  DEFAULT_FILE_NAME = 'station_info.json';
+
+{ TStationInfo }
+
+constructor TStationInfo.Create;
+begin
+  inherited Create;
+  FMyCall := '';
+  FOperCall := '';
+  FMyName := '';
+  FMyQth := '';
+  FMyLocator := '';
+  FMyAntenna := '';
+end;
+
+class function TStationInfo.DefaultFilePath: string;
+begin
+  { ParamStr(0) = 実行ファイルのパス。ユーザー要望「実行ファイルと
+    同じディレクトリ」に保存するため ExtractFilePath で
+    ディレクトリ部分のみを取り出す。 }
+  Result := IncludeTrailingPathDelimiter(ExtractFilePath(ParamStr(0)))
+    + DEFAULT_FILE_NAME;
+end;
+
+procedure TStationInfo.LoadFromFile(const AFileName: string);
+var
+  sl: TStringList;
+  data: TJSONData;
+  obj: TJSONObject;
+begin
+  if not FileExists(AFileName) then
+    Exit; // 初回起動等、ファイルが無いのは正常系。既定値(空文字)のまま。
+
+  sl := TStringList.Create;
+  try
+    sl.LoadFromFile(AFileName);
+    try
+      data := GetJSON(sl.Text);
+    except
+      on E: Exception do
+        raise EStationInfoError.Create(
+          'station_info.json の解析に失敗しました: ' + E.Message);
+    end;
+    try
+      if not (data is TJSONObject) then
+        raise EStationInfoError.Create(
+          'station_info.json の内容が JSON オブジェクトではありません');
+      obj := TJSONObject(data);
+      FMyCall    := obj.Get(KEY_MY_CALL, '');
+      FOperCall  := obj.Get(KEY_OPER_CALL, '');
+      FMyName    := obj.Get(KEY_MY_NAME, '');
+      FMyQth     := obj.Get(KEY_MY_QTH, '');
+      FMyLocator := obj.Get(KEY_MY_LOCATOR, '');
+      FMyAntenna := obj.Get(KEY_MY_ANTENNA, '');
+    finally
+      data.Free;
+    end;
+  finally
+    sl.Free;
+  end;
+end;
+
+procedure TStationInfo.SaveToFile(const AFileName: string);
+var
+  obj: TJSONObject;
+  sl: TStringList;
+begin
+  obj := TJSONObject.Create;
+  try
+    obj.Add(KEY_MY_CALL, FMyCall);
+    obj.Add(KEY_OPER_CALL, FOperCall);
+    obj.Add(KEY_MY_NAME, FMyName);
+    obj.Add(KEY_MY_QTH, FMyQth);
+    obj.Add(KEY_MY_LOCATOR, FMyLocator);
+    obj.Add(KEY_MY_ANTENNA, FMyAntenna);
+
+    sl := TStringList.Create;
+    try
+      sl.Text := obj.FormatJSON;
+      sl.SaveToFile(AFileName);
+    finally
+      sl.Free;
+    end;
+  finally
+    obj.Free;
+  end;
+end;
+
+procedure TStationInfo.LoadDefault;
+begin
+  LoadFromFile(DefaultFilePath);
+end;
+
+procedure TStationInfo.SaveDefault;
+begin
+  SaveToFile(DefaultFilePath);
+end;
+
+end.
