@@ -205,7 +205,14 @@ begin
 end;
 
 destructor THamlibRigControl.Destroy;
+{ RIG-11: PTT の解除は "ここ" で行う必要がある。
+  基底 TCustomRigControl.Destroy にも EnsurePttOff があるが、それが走るのは
+  この本体が終わった後 (inherited Destroy) であり、その時点では既に
+  Close 済み = FIsOpen が False なので、何もできずに終わっていた。
+  つまり実機クラスではフェイルセーフが働いていなかった。
+  Close より先に、通信路が生きているうちに下ろす。 }
 begin
+  EnsurePttOff;
   if IsOpen then
     Close;
   if FHandle <> nil then

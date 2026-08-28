@@ -189,10 +189,12 @@ begin
   WriteLn('=== テスト完了 ===');
 
   { APP-01: 破棄順序を本体 (UnitMainForm.Destroy) と揃える。
-    UI を先に切り離さずにエンジンを解放すると、TModemUI.Destroy ->
-    DetachEngine が解放済みエンジンへ書き込む use-after-free になる。
-    以前のテストはこの順序を再現したまま成功終了していたため、
-    欠陥を見逃していた。 }
+    (1) ワーカースレッドを止める (上の RequestExit/WaitFor で完了済み)
+    (2) UI を破棄する -- DetachEngine のためエンジン本体はまだ生かす
+    (3) エンジン本体を破棄する
+    逆順にすると TModemUI.Destroy -> DetachEngine が解放済みエンジンへ
+    書き込む use-after-free になる。以前のテストはこの順序を再現したまま
+    成功終了していたため、欠陥を見逃していた。 }
   UI.Free;
   Engine.Free;
   Form.Free;

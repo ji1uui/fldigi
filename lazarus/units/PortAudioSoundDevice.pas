@@ -93,14 +93,21 @@ type
     FLock: TCriticalSection;
     FIoActive: Integer;       // ブロッキング入出力を実行中のスレッド数
     FClosing: Boolean;        // Close/AbortIO 進行中 (新規の入出力を拒む)
+    { Open と Close (と Open 冒頭の暗黙 Close) が交錯すると
+      「閉じたつもりで開いている」状態が残る。ストリームの生成・破棄という
+      粒度の粗い操作は、この専用ロックで丸ごと直列化する。
+      ブロッキング入出力はこのロックを取らないので、Close は待たされない。 }
+    FLifecycleLock: TCriticalSection;
+    procedure DoClose;
     function FindDeviceIndex(const ANamePart: string; ANeedInput: Boolean): PaDeviceIndex;
     procedure CheckPaError(AErr: PaError; const AContext: string);
     { 入出力を開始してよければ True を返し、使用するハンドルを AStream に
       設定して FIoActive を 1 増やす。呼び出し側は必ず EndIo を呼ぶこと。 }
     function BeginIo(out AStream: PPaStream): Boolean;
     procedure EndIo;
-    { 実行中の入出力がすべて抜けるまで待つ (最大 ATimeoutMs)。 }
-    procedure WaitForIoIdle(ATimeoutMs: Integer);
+    { 実行中の入出力がすべて抜けるまで待つ (最大 ATimeoutMs)。
+      戻り値: すべて抜けたか。False ならハンドルはまだ使用中である。 }
+    function WaitForIoIdle(ATimeoutMs: Integer): Boolean;
   public
     constructor Create; override;
     constructor Create(const ADeviceName: string); reintroduce;
@@ -139,13 +146,21 @@ var
   GInitialized: Boolean = False;
 
 procedure PaRefAcquire;
+var
+  err: PaError;
 begin
   GRefLock.Enter;
   try
     if GRefCount = 0 then
     begin
-      if Pa_Initialize <> paNoError then
-        raise EPortAudioError.Create(Pa_Initialize, 'Pa_Initialize');
+      { 以前は条件式と例外生成で Pa_Initialize を 2 回呼んでいた。
+        PortAudio 側も内部で参照カウントを持つため二重初期化になり、
+        しかも 2 回目は成功するのでエラー文言が
+        "PortAudio error in Pa_Initialize: 0 (Success)" という
+        意味不明なものになっていた。 }
+      err := Pa_Initialize;
+      if err <> paNoError then
+        raise EPortAudioError.Create(err, 'Pa_Initialize');
       GInitialized := True;
     end;
     Inc(GRefCount);
@@ -204,6 +219,7 @@ begin
   FResolvedDeviceIndex := paNoDevice;
   FLatencySec := 0.1; // 既定 100ms (fldigi の defaultLowLatency相当より少し安全側)
   FLock := TCriticalSection.Create;
+  FLifecycleLock := TCriticalSection.Create;
   FIoActive := 0;
   FClosing := False;
   PaRefAcquire;
@@ -214,9 +230,17 @@ begin
   { AUD-04/AUD-07: IsOpen だけを見て Close を飛ばすと、Pa_StartStream 失敗後や
     AbortIO 後に「IsOpen=False なのにストリームは開いたまま」という状態を
     取りこぼし、開いたまま Pa_Terminate へ進んでいた。ハンドルの有無で判断する。 }
-  Close;
+  try
+    { Close は入出力が終わらないと例外を投げうる (使用中のストリームを
+      解放しないため)。破棄処理自体は最後まで進める必要があるので、
+      ここでは握り潰す。 }
+    Close;
+  except
+    on E: Exception do ;
+  end;
   PaRefRelease;
   FLock.Free;
+  FLifecycleLock.Free;
   inherited Destroy;
 end;
 
@@ -248,7 +272,7 @@ begin
   end;
 end;
 
-procedure TPortAudioSoundDevice.WaitForIoIdle(ATimeoutMs: Integer);
+function TPortAudioSoundDevice.WaitForIoIdle(ATimeoutMs: Integer): Boolean;
 var
   waited: Integer;
   busy: Boolean;
@@ -261,10 +285,11 @@ begin
     finally
       FLock.Leave;
     end;
-    if not busy then Exit;
+    if not busy then Exit(True);
     Sleep(1);
     Inc(waited);
   until waited >= ATimeoutMs;
+  Result := False;
 end;
 
 procedure TPortAudioSoundDevice.CheckPaError(AErr: PaError; const AContext: string);
@@ -321,80 +346,100 @@ var
   LocalStream: PPaStream;
 begin
   Result := False;
-  Close;
-
-  FDirection := Direction;
-  IsInput := (Direction = sdRead);
-  FResolvedDeviceIndex := FindDeviceIndex(FDeviceName, IsInput);
-  if FResolvedDeviceIndex = paNoDevice then
-    raise EPortAudioError.Create(PaError(-1), 'FindDeviceIndex (デバイスが見つからない)');
-
-  if Channels < 1 then
-    raise ESoundError.CreateFmt('チャネル数が不正です: %d', [Channels]);
-
-  FillChar(Params, SizeOf(Params), 0);
-  Params.device := FResolvedDeviceIndex;
-  Params.channelCount := Channels; // TCustomSoundDevice.Channels (既定1=モノラル)
-  Params.sampleFormat := paFloat32;
-  Params.suggestedLatency := FLatencySec;
-  Params.hostApiSpecificStreamInfo := nil;
-
-  di := Pa_GetDeviceInfo(FResolvedDeviceIndex);
-  if di <> nil then
-  begin
-    { AUD-03: 出力にも defaultLowInputLatency を使っていたため、出力側の
-      レイテンシ指定が実態と合っていなかった。方向ごとの既定値を使う。 }
-    if IsInput then
-      Params.suggestedLatency := di^.defaultLowInputLatency
-    else
-      Params.suggestedLatency := di^.defaultLowOutputLatency;
-    if (IsInput and (di^.maxInputChannels < Channels)) or
-       ((not IsInput) and (di^.maxOutputChannels < Channels)) then
-      raise ESoundError.CreateFmt(
-        'デバイスが要求チャネル数に対応していません (要求 %d)', [Channels]);
-  end;
-
-  { AUD-04: ローカルハンドルで組み立て、全段成功して初めてコミットする。
-    以前は Pa_OpenStream 成功後に Pa_StartStream が失敗すると、FStream に
-    ハンドルが残ったまま IsOpen は False になり、デストラクタが Close を
-    飛ばして「開いたまま Pa_Terminate」になっていた。 }
-  LocalStream := nil;
-  if IsInput then
-    ErrCode := Pa_OpenStream(LocalStream, @Params, nil, ASampleRate,
-      paFramesPerBufferUnspecified, 0, nil, nil)
-  else
-    ErrCode := Pa_OpenStream(LocalStream, nil, @Params, ASampleRate,
-      paFramesPerBufferUnspecified, 0, nil, nil);
-  CheckPaError(ErrCode, 'Pa_OpenStream');
-
-  ErrCode := Pa_StartStream(LocalStream);
-  if ErrCode <> paNoError then
-  begin
-    { 開いてしまったストリームを必ず片付けてから例外にする。 }
-    Pa_CloseStream(LocalStream);
-    raise EPortAudioError.Create(ErrCode, 'Pa_StartStream');
-  end;
-
-  FLock.Enter;
+  FLifecycleLock.Enter;
   try
-    FStream := LocalStream;
-    FClosing := False;
-    SampleRate := ASampleRate;
-    IsOpenFlag := True;
+    DoClose;
+
+    FDirection := Direction;
+    IsInput := (Direction = sdRead);
+    FResolvedDeviceIndex := FindDeviceIndex(FDeviceName, IsInput);
+    if FResolvedDeviceIndex = paNoDevice then
+      raise EPortAudioError.Create(PaError(-1), 'FindDeviceIndex (デバイスが見つからない)');
+
+    if Channels < 1 then
+      raise ESoundError.CreateFmt('チャネル数が不正です: %d', [Channels]);
+
+    FillChar(Params, SizeOf(Params), 0);
+    Params.device := FResolvedDeviceIndex;
+    Params.channelCount := Channels; // TCustomSoundDevice.Channels (既定1=モノラル)
+    Params.sampleFormat := paFloat32;
+    Params.suggestedLatency := FLatencySec;
+    Params.hostApiSpecificStreamInfo := nil;
+
+    di := Pa_GetDeviceInfo(FResolvedDeviceIndex);
+    if di <> nil then
+    begin
+      { AUD-03: 出力にも defaultLowInputLatency を使っていたため、出力側の
+        レイテンシ指定が実態と合っていなかった。方向ごとの既定値を使う。 }
+      if IsInput then
+        Params.suggestedLatency := di^.defaultLowInputLatency
+      else
+        Params.suggestedLatency := di^.defaultLowOutputLatency;
+      if (IsInput and (di^.maxInputChannels < Channels)) or
+         ((not IsInput) and (di^.maxOutputChannels < Channels)) then
+        raise ESoundError.CreateFmt(
+          'デバイスが要求チャネル数に対応していません (要求 %d)', [Channels]);
+    end;
+
+    { AUD-04: ローカルハンドルで組み立て、全段成功して初めてコミットする。
+      以前は Pa_OpenStream 成功後に Pa_StartStream が失敗すると、FStream に
+      ハンドルが残ったまま IsOpen は False になり、デストラクタが Close を
+      飛ばして「開いたまま Pa_Terminate」になっていた。 }
+    LocalStream := nil;
+    if IsInput then
+      ErrCode := Pa_OpenStream(LocalStream, @Params, nil, ASampleRate,
+        paFramesPerBufferUnspecified, 0, nil, nil)
+    else
+      ErrCode := Pa_OpenStream(LocalStream, nil, @Params, ASampleRate,
+        paFramesPerBufferUnspecified, 0, nil, nil);
+    CheckPaError(ErrCode, 'Pa_OpenStream');
+
+    ErrCode := Pa_StartStream(LocalStream);
+    if ErrCode <> paNoError then
+    begin
+      { 開いてしまったストリームを必ず片付けてから例外にする。 }
+      Pa_CloseStream(LocalStream);
+      raise EPortAudioError.Create(ErrCode, 'Pa_StartStream');
+    end;
+
+    FLock.Enter;
+    try
+      FStream := LocalStream;
+      FClosing := False;
+      SampleRate := ASampleRate;
+      IsOpenFlag := True;
+    finally
+      FLock.Leave;
+    end;
+    Result := True;
   finally
-    FLock.Leave;
+    FLifecycleLock.Leave;
   end;
-  Result := True;
 end;
 
 procedure TPortAudioSoundDevice.Close;
+begin
+  { Open との交錯を防ぐため、ストリームの生成・破棄は直列化する。 }
+  FLifecycleLock.Enter;
+  try
+    DoClose;
+  finally
+    FLifecycleLock.Leave;
+  end;
+end;
+
+procedure TPortAudioSoundDevice.DoClose;
 { AUD-07: ブロッキング入出力中に呼ばれても安全に閉じる。
   手順は「新規入出力を止める → 実行中のブロッキング呼び出しを
   Pa_AbortStream で解除する → 全員が抜けるまで待つ → 実際に閉じる」。
   実行中スレッドはローカルにハンドルを保持しているため、最後まで
-  待ってから Pa_CloseStream しないと解放済みハンドルを触ることになる。 }
+  待ってから Pa_CloseStream しないと解放済みハンドルを触ることになる。
+  呼び出し元は FLifecycleLock を保持していること。 }
+const
+  IO_DRAIN_TIMEOUT_MS = 2000;
 var
   h: PPaStream;
+  drained: Boolean;
 begin
   FLock.Enter;
   try
@@ -420,10 +465,7 @@ begin
   { ブロッキング中の Pa_ReadStream/Pa_WriteStream を解除する。
     戻り値は見ない (既に停止しているケースもあるため)。 }
   Pa_AbortStream(h);
-  WaitForIoIdle(2000);
-
-  Pa_StopStream(h);   // エラーは無視 (fldigi: Close() も戻り値を見ない)
-  Pa_CloseStream(h);
+  drained := WaitForIoIdle(IO_DRAIN_TIMEOUT_MS);
 
   FLock.Enter;
   try
@@ -431,6 +473,24 @@ begin
   finally
     FLock.Leave;
   end;
+
+  if not drained then
+  begin
+    { まだ Pa_ReadStream/Pa_WriteStream の中にいるスレッドが、このハンドルを
+      ローカル変数で保持している。ここで Pa_CloseStream すると
+      「使用中のストリームを解放する」ことになり未定義動作になるので、
+      あえてハンドルを解放しない (漏らす)。デバイスの抜去などで
+      PortAudio が戻ってこないときにだけ起きる異常系であり、
+      1個のストリームを漏らす方がクラッシュより害が小さい。
+      黙って続行はせず、呼び出し元に事実を伝える。 }
+    raise ESoundError.CreateFmt(
+      'サウンドストリームを閉じられませんでした: 入出力が %d ms 以内に ' +
+      '終了しません (デバイスが応答していない可能性があります)',
+      [IO_DRAIN_TIMEOUT_MS]);
+  end;
+
+  Pa_StopStream(h);   // エラーは無視 (fldigi: Close() も戻り値を見ない)
+  Pa_CloseStream(h);
 end;
 
 procedure TPortAudioSoundDevice.AbortIO;
@@ -567,17 +627,17 @@ var
   n, i: Integer;
   di: PPaDeviceInfo;
 begin
-  SetLength(Result, 0);
+  Result := nil;
+  { 以前は GRefCount を見て自前で Pa_Initialize/Pa_Terminate していたため、
+    列挙中に他スレッドがデバイスを開くと、この関数の Pa_Terminate が
+    そのストリームごと PortAudio を落としていた。参照カウントに一本化する。 }
   NeedTerm := False;
-  GRefLock.Enter;
   try
-    if GRefCount = 0 then
-    begin
-      if Pa_Initialize <> paNoError then Exit;
-      NeedTerm := True;
-    end;
-  finally
-    GRefLock.Leave;
+    PaRefAcquire;
+    NeedTerm := True;
+  except
+    on E: Exception do
+      Exit;   // PortAudio が使えない環境では空リストを返す
   end;
 
   try
@@ -598,7 +658,7 @@ begin
     end;
   finally
     if NeedTerm then
-      Pa_Terminate;
+      PaRefRelease;
   end;
 end;
 

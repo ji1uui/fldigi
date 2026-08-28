@@ -83,6 +83,10 @@ type
 
     function GetState: TTrxState;
     function GetActiveModem: TCustomModem;
+    function GetOnStateChanged: TEngineStateEvent;
+    procedure SetOnStateChanged(AValue: TEngineStateEvent);
+    function GetOnError: TEngineErrorEvent;
+    procedure SetOnError(AValue: TEngineErrorEvent);
     procedure SetRequestedState(AValue: TTrxState);
     { ワーカースレッド内で保留中の差し替えを適用する (ENG-02)。 }
     procedure ApplyPendingModemChange;
@@ -110,7 +114,12 @@ type
     destructor Destroy; override;
 
     { fldigi: void trx_start_modem(modem* m, int f = 0);
-      アクティブモデムを安全に差し替える。エンジンが動作中でも呼べる。 }
+      アクティブモデムを安全に差し替える。エンジンが動作中でも呼べる。
+      復帰した時点で差し替えは完了しているので、呼び出し側はそこで
+      旧モデムを解放してよい (失敗時は例外)。
+      【前提条件】複数スレッドから同時に呼ばないこと。完了待ちに 1 個の
+      イベントを使うため、同時呼び出しでは待ち合わせが混線する。
+      モード切替は UI/制御スレッド 1 本から行う想定である。 }
     procedure SetModem(AModem: TCustomModem);
 
     { fldigi: void trx_receive(void); -- STATE_RX への遷移要求 }
@@ -131,8 +140,12 @@ type
     property State: TTrxState read GetState;
     property ActiveModem: TCustomModem read GetActiveModem;
 
-    property OnStateChanged: TEngineStateEvent read FOnStateChanged write FOnStateChanged;
-    property OnError: TEngineErrorEvent read FOnError write FOnError;
+    { ハンドラの取り付け・取り外しは走行中にも行われる。メソッドポインタは
+      コード部とデータ部の2ワードあり代入がアトミックではないため、
+      読み書きの両方をロックで守る (片方だけでは "コードは旧・データは nil" の
+      ちぎれた値を読みうる)。 }
+    property OnStateChanged: TEngineStateEvent read GetOnStateChanged write SetOnStateChanged;
+    property OnError: TEngineErrorEvent read GetOnError write SetOnError;
   end;
 
 implementation
@@ -220,40 +233,82 @@ procedure TModemEngine.SetModem(AModem: TCustomModem);
   SetModem 復帰後に旧モデムを安全に解放できる。 }
 const
   SWAP_TIMEOUT_MS = 5000;
+  SWAP_POLL_MS = 20;
 var
-  running: Boolean;
+  running, applied: Boolean;
+  waited: Integer;
 begin
   FLock.Enter;
   try
-    running := FStarted and (not Finished) and (not Terminated);
-    if not running then
+    running := FStarted and (not Finished);
+    if running then
     begin
-      { スレッド未開始/停止済みなら競合相手がいないので直接適用する。 }
-      FActiveModem := AModem;
-      if Assigned(FActiveModem) then
-      begin
-        FActiveModem.Init;
-        FActiveModem.RxInit;
-      end;
-      Exit;
+      FPendingModem := AModem;
+      FModemChangeRequested := True;
+      FModemChangeDone.ResetEvent;
     end;
-    FPendingModem := AModem;
-    FModemChangeRequested := True;
-    FModemChangeDone.ResetEvent;
   finally
     FLock.Leave;
   end;
 
+  if not running then
+  begin
+    { スレッド未開始/停止済みなら競合相手がいないので自分で適用する。
+      Init/RxInit はモデム側の任意コードなので、ロックを持ったままでは
+      呼ばない (呼び戻されるとデッドロックする)。 }
+    FLock.Enter;
+    try
+      FPendingModem := AModem;
+      FModemChangeRequested := True;
+    finally
+      FLock.Leave;
+    end;
+    ApplyPendingModemChange;
+    Exit;
+  end;
+
   { RX 1ブロック分の読み取りが終われば適用されるため、通常は数十msで完了する。
-    応答が無い場合は黙って競合させるより、原因の分かる失敗にする。 }
-  if FModemChangeDone.WaitFor(SWAP_TIMEOUT_MS) <> wrSignaled then
-    raise EModemEngineError.Create(
-      'モデムの差し替えがタイムアウトしました (エンジンが応答していません)');
+    ただし待っている最中にワーカーが終了しうる (RequestExit との競合)。
+    その場合は適用する者がいなくなるので、自分で引き取る。 }
+  waited := 0;
+  applied := False;
+  while True do
+  begin
+    if FModemChangeDone.WaitFor(SWAP_POLL_MS) = wrSignaled then
+    begin
+      applied := True;
+      Break;
+    end;
+    if Finished then Break;   // ワーカーはもう適用しない
+    Inc(waited, SWAP_POLL_MS);
+    if waited >= SWAP_TIMEOUT_MS then Break;
+  end;
+
+  if applied then Exit;
+
+  if Finished then
+  begin
+    { ワーカーは停止済み = 競合相手がいないので、ここで適用して契約を守る。 }
+    ApplyPendingModemChange;
+    Exit;
+  end;
+
+  { 生きているのに応答しない。黙って競合させるより、原因の分かる失敗にする。 }
+  FLock.Enter;
+  try
+    FModemChangeRequested := False;
+    FPendingModem := nil;
+  finally
+    FLock.Leave;
+  end;
+  raise EModemEngineError.Create(
+    'モデムの差し替えがタイムアウトしました (エンジンが応答していません)');
 end;
 
 procedure TModemEngine.ApplyPendingModemChange;
-{ ワーカースレッドからのみ呼ぶ。ここが FActiveModem を書き換える唯一の
-  場所なので、RX/TX 側はロックなしで読んでよい。 }
+{ 原則としてワーカースレッドから呼ぶ。ワーカーが停止済みであることを
+  確認できた場合に限り SetModem からも呼ぶ (適用する者がいないため)。
+  どちらの経路でも、要求を取り出せた 1 スレッドだけが適用する。 }
 var
   newModem: TCustomModem;
   changed: Boolean;
@@ -266,6 +321,9 @@ begin
     begin
       FModemChangeRequested := False;
       FPendingModem := nil;
+      { 代入もロック下で行う。GetActiveModem はロック下で読むので、
+        書き側だけロック外だと保護にならない。 }
+      FActiveModem := newModem;
     end;
   finally
     FLock.Leave;
@@ -273,11 +331,13 @@ begin
   if not changed then Exit;
 
   try
-    FActiveModem := newModem;
-    if Assigned(FActiveModem) then
+    { Init/RxInit はモデム側の任意コードなのでロック外で呼ぶ。
+      FActiveModem を読むのはこのスレッド自身 (RX/TX ループと同一) なので
+      この間に他スレッドが差し替えることはない。 }
+    if Assigned(newModem) then
     begin
-      FActiveModem.Init;
-      FActiveModem.RxInit;
+      newModem.Init;
+      newModem.RxInit;
     end;
   finally
     { 例外が起きても待機側を必ず解放する (デッドロック防止)。 }
@@ -355,20 +415,70 @@ begin
   Terminate;
   AbortBlockingIo;   // ENG-04: ブロッキング中の読み取りを解除する
 
-  { 差し替え完了を待っているスレッドがいたら解放する (終了時のデッドロック防止) }
-  FModemChangeDone.SetEvent;
+  { ここで FModemChangeDone.SetEvent はしない。適用していないのに待機側を
+    解放すると SetModem が「差し替え済み」として戻り、呼び出し側が
+    まだ使われている旧モデムを解放してしまう。待機側はワーカーの終了を
+    Finished で検出して自分で引き取る (SetModem を参照)。 }
+end;
+
+function TModemEngine.GetOnStateChanged: TEngineStateEvent;
+begin
+  FLock.Enter;
+  try
+    Result := FOnStateChanged;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TModemEngine.SetOnStateChanged(AValue: TEngineStateEvent);
+begin
+  FLock.Enter;
+  try
+    FOnStateChanged := AValue;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+function TModemEngine.GetOnError: TEngineErrorEvent;
+begin
+  FLock.Enter;
+  try
+    Result := FOnError;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TModemEngine.SetOnError(AValue: TEngineErrorEvent);
+begin
+  FLock.Enter;
+  try
+    FOnError := AValue;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 procedure TModemEngine.DoStateChanged(ANewState: TTrxState);
+var
+  h: TEngineStateEvent;
 begin
-  if Assigned(FOnStateChanged) then
-    FOnStateChanged(Self, ANewState);
+  { ロック下では "写す" だけ。呼び出しはロック外で行う
+    (購読側が本エンジンを呼び返してもデッドロックしないため)。 }
+  h := GetOnStateChanged;
+  if Assigned(h) then
+    h(Self, ANewState);
 end;
 
 procedure TModemEngine.DoError(const AMsg: string);
+var
+  h: TEngineErrorEvent;
 begin
-  if Assigned(FOnError) then
-    FOnError(Self, AMsg);
+  h := GetOnError;
+  if Assigned(h) then
+    h(Self, AMsg);
 end;
 
 procedure TModemEngine.RxLoopStep;
@@ -485,15 +595,29 @@ begin
         end;
       except
         { 個々のステップで捕まえ切れなかった例外。スレッドを黙って
-          終わらせず、原因を通知したうえで停止状態へ移す。 }
+          終わらせず、原因を通知したうえで停止状態へ移す。
+          ただし終了要求の最中は別で、RequestExit が AbortIO で
+          ブロッキングI/Oを叩き落とした結果の例外がここに来る。
+          これは想定内の停止手順なので「エラー」として通知しない
+          (毎回の終了時に偽のエラーが出ることになる)。 }
         on E: Exception do
         begin
-          DoError('エンジンループで例外が発生しました: ' + E.Message);
-          SetRequestedState(tsPause);
+          if not Terminated then
+          begin
+            DoError('エンジンループで例外が発生しました: ' + E.Message);
+            SetRequestedState(tsPause);
+          end;
         end;
       end;
     end;
   finally
+    { 停止する前に、保留中の差し替えがあれば適用しておく。
+      待機している SetModem に「適用済み」として応えられる唯一の機会。 }
+    try
+      ApplyPendingModemChange;
+    except
+      on E: Exception do ;
+    end;
     { 終了経路がどれであっても tsExit を通知して終わる。
       通知先の例外でデストラクタ側の WaitFor を妨げない。 }
     try
@@ -501,8 +625,6 @@ begin
     except
       on E: Exception do ;
     end;
-    { 差し替え待ちが残っていれば解放する }
-    FModemChangeDone.SetEvent;
   end;
 end;
 

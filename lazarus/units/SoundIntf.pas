@@ -58,7 +58,12 @@ type
     function Open(Direction: TSoundDirection; ASampleRate: Integer): Boolean; virtual; abstract;
     { fldigi: virtual void Close(unsigned dir) }
     procedure Close; virtual; abstract;
-    { fldigi: virtual void Abort(unsigned dir) }
+    { fldigi: virtual void Abort(unsigned dir)
+      進行中のブロッキング入出力を直ちに解除する。エンジンの終了時に
+      ワーカーが Read/Write の中で止まったままにならないようにするための
+      入口であり、「解除のためにストリームを閉じてよい」と定義する
+      (= 呼び出し後は IsOpen が False になりうる)。
+      再び使うには Open からやり直すこと。 }
     procedure AbortIO; virtual; abstract;
 
     { fldigi: virtual size_t Read(float *buf, size_t count)

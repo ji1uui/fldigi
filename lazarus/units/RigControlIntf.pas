@@ -67,6 +67,11 @@ uses
   Classes, SysUtils;
 
 type
+  { RIG-11: TransmitGuarded に渡す送信処理。
+    System.TProcedure (グローバル手続き) ではフォームやコントローラの
+    メソッドを渡せないため、"of object" 版を定義する。 }
+  TRigTransmitProc = procedure of object;
+
   { fldigi: class RigException (rigclass.h) }
   ERigControlError = class(Exception)
   private
@@ -146,8 +151,11 @@ type
 
     { RIG-11: 送信を伴う処理を安全に囲むためのヘルパー。
       ATransmitProc の実行中に例外が出ても、必ず PTT を下ろしてから
-      例外を再送出する。呼び出し側の finally 書き忘れを防ぐ。 }
-    procedure TransmitGuarded(ATransmitProc: TProcedure);
+      例外を再送出する。呼び出し側の finally 書き忘れを防ぐ。
+      引数は "procedure of object" である点に注意 (System.TProcedure だと
+      グローバル手続きしか渡せず、フォームやコントローラのメソッドを
+      渡せないため実質使えなかった)。 }
+    procedure TransmitGuarded(ATransmitProc: TRigTransmitProc);
 
     { 自分が送信を ON にしている状態か (フェイルセーフの判定用)。 }
     property PttAsserted: Boolean read FPttAsserted;
@@ -261,7 +269,13 @@ end;
 
 destructor TCustomRigControl.Destroy;
 { RIG-11: 破棄経路でも必ず送信を止める。Close より先に PTT を下ろすのは、
-  Close で通信路が閉じてしまうと PTT を操作できなくなるため。 }
+  Close で通信路が閉じてしまうと PTT を操作できなくなるため。
+
+  ※ここでの EnsurePttOff は "最後の保険" にすぎない。基底デストラクタが
+    走る時点で派生クラスのデストラクタ本体は既に終わっており、派生が
+    自分で Close 済みなら (FIsOpen=False) 何もできない。したがって
+    実際に PTT を下ろす責任は派生デストラクタの先頭にある
+    (THamlibRigControl.Destroy を参照)。 }
 begin
   EnsurePttOff;
   if FIsOpen then
@@ -284,9 +298,19 @@ function TCustomRigControl.EnsurePttOff: Boolean;
 begin
   Result := True;
   if not FPttAsserted then Exit;   // 自分は送信していない
+
+  if not (FIsOpen and CanSetPTT) then
+  begin
+    { 通信路が閉じている等で PTT を操作できない。ここで True を返すと
+      「下ろせた」と誤って報告することになる (電波が出続けているのに
+      呼び出し側は正常終了と判断してしまう)。記録も消さずに残し、
+      再オープン後の再試行で下ろせるようにする。 }
+    Result := False;
+    Exit;
+  end;
+
   try
-    if FIsOpen and CanSetPTT then
-      SetPTT(False);
+    SetPTT(False);
     FPttAsserted := False;
   except
     on E: Exception do
@@ -298,8 +322,11 @@ begin
   end;
 end;
 
-procedure TCustomRigControl.TransmitGuarded(ATransmitProc: TProcedure);
+procedure TCustomRigControl.TransmitGuarded(ATransmitProc: TRigTransmitProc);
 begin
+  if not Assigned(ATransmitProc) then
+    raise ERigControlError.Create(-1,
+      'TransmitGuarded: 送信処理が指定されていません');
   try
     ATransmitProc();
   finally

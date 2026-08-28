@@ -129,29 +129,38 @@ destructor TMainForm.Destroy;
 { APP-01: 以前は FEngine.Free の後に FUI.Free していたため、
   TModemUI.Destroy -> DetachEngine が解放済みエンジンのイベントへ
   書き込む use-after-free になっていた。
-  正しい順序は「UI を先に切り離す (キューに残った通知も取り消す)
-  -> エンジンを停止・破棄 -> モデム/デバイスを破棄」。 }
-begin
-  { 1. まず UI を切り離す。以降エンジン/モデムからの通知は来ないし、
-       Queue に残っていた分も TModemUI.Destroy が取り消す。 }
-  FUI.Free;
-  FUI := nil;
 
-  { 2. エンジンを停止して破棄する。 }
+  ただし「UI を先に Free」だけでも足りない。切り離しは "これから来る"
+  通知を止めるだけで、既にワーカーが TModemUI の中に入っている呼び出しは
+  止められないからである。確実なのは、
+    ワーカースレッドを完全に停止させてから UI を破棄する
+  という順序。停止後ならコールバックの発生源そのものが無い。
+  エンジン "オブジェクト" は UI が切り離しに使うので、UI より後に解放する。 }
+begin
+  { 1. ワーカースレッドを止める。ここが完了した時点で、モデム/エンジンから
+       UI へのコールバックは発生しえない (ブロッキングI/Oも解除済み)。 }
   if Assigned(FEngine) then
   begin
     FEngine.RequestExit;   // ブロッキングI/Oの解除も行う (ENG-04)
     FEngine.WaitFor;
-    FEngine.Free;
-    FEngine := nil;
   end;
 
-  { 3. エンジンが完全に止まってからモデムとデバイスを解放する。 }
+  { 2. UI を破棄する。DetachEngine がエンジンのイベントを外すので、
+       エンジン本体はまだ生きている必要がある。 }
+  FUI.Free;
+  FUI := nil;
+
+  { 3. エンジン本体を破棄する (スレッドは既に停止済み)。 }
+  FEngine.Free;
+  FEngine := nil;
+
+  { 4. エンジンが完全に止まってからモデムとデバイスを解放する。 }
   FModem.Free;
   FModem := nil;
   FSound.Free;
   FSound := nil;
   FTxLock.Free;
+  FTxLock := nil;
   inherited Destroy;
 end;
 

@@ -123,13 +123,33 @@ type
     procedure DrainToUi;
     procedure ScheduleDrain;
 
+    { --- 破棄とワーカー呼び出しの競合を狭めるための在席カウンタ ---
+      DetachModem/DetachEngine は「これ以降の呼び出し」を止めるだけで、
+      既に中に入っている呼び出しは止められない。ワーカーが PushEvent の
+      FLock.Enter で待っている最中に Destroy が FLock.Free をすると
+      解放済みロックを掴むことになる (ENG-01 と同じ型の不具合)。
+      そこで「今このオブジェクトのコールバック内にいるスレッド数」を
+      ロックの外側で数え、Destroy はそれが 0 になるまで解放を待つ。
+      カウンタ自体はロックで守れない (守るべきロックを解放する判断に
+      使うため) ので、インターロック命令で操作する。
+
+      【できることの限界】これが救うのは「Destroy に入った時点で既に
+      中にいた呼び出し」だけである。Destroy が戻った後に始まる呼び出しは、
+      オブジェクトのメモリ自体が解放済みなので何をしても救えない。
+      したがって呼び出し側の責務は変わらない:
+        エンジンのワーカースレッドを停止させてから TModemUI を破棄すること。
+      在席カウンタはその順序を守った上での安全網である。 }
+    function EnterCallback: Boolean;
+    procedure LeaveCallback;
+
   private
     FLock: TCriticalSection;
     FQueue: array of TUiEvent;      // 有界FIFO (順序保持が必要なイベント)
     FQHead, FQCount: Integer;
     FDropped: Int64;                // 溢れて捨てた件数 (診断用)
     FDrainScheduled: Boolean;
-    FShuttingDown: Boolean;
+    FShuttingDown: Boolean;         // ロック外からも読む (在席カウンタと対で使う)
+    FInFlight: Integer;             // コールバック実行中のスレッド数
 
     { 合流させる最新値 (順序を保つ必要がないもの) }
     FLatestFrequency: Double;
@@ -147,7 +167,16 @@ type
       const AStrValue: string);
 
     { モデム/エンジンを購読対象として登録する。
-      fldigi でいう「active_modem に対して各種フックを仕込む」処理。 }
+      fldigi でいう「active_modem に対して各種フックを仕込む」処理。
+
+      【前提条件】Attach/Detach は「エンジンのワーカースレッドが動いて
+      いない間」に行うこと (生成直後、または RequestExit + WaitFor の後)。
+      TCustomModem のイベントはロックを持たずに発火するため、走行中に
+      付け外しすると、2ワードあるメソッドポインタのちぎれた値を
+      ワーカーが読む危険がある。TModemEngine 側のイベントはロックで
+      守ってあるが、モデム側まで同じ保護を入れると DSP のホットパスに
+      ロックが乗るため、呼び出し順序で保証する設計とする。
+      本アプリの破棄手順 (UnitMainForm.Destroy) もこの順序に従っている。 }
     procedure AttachModem(AModem: TCustomModem);
     procedure AttachEngine(AEngine: TModemEngine);
     procedure DetachModem;
@@ -197,6 +226,7 @@ begin
   FDropped := 0;
   FDrainScheduled := False;
   FShuttingDown := False;
+  FInFlight := 0;
   FHasFrequency := False;
   FHasMetric := False;
 end;
@@ -207,27 +237,54 @@ destructor TModemUI.Destroy;
   解放済み Self のメソッドを呼ぶ (UAF) 状態だった。
   積むメソッドを DrainToUi 1 種類に統一したので、
   RemoveQueuedEvents(TThreadMethod) でまとめて取り消せる。 }
+const
+  QUIESCE_TIMEOUT_MS = 2000;
+var
+  waited: Integer;
+  idle: Boolean;
 begin
-  { まず新規投入を止める }
-  FLock.Enter;
-  try
-    FShuttingDown := True;
-    FQCount := 0;
-    FQHead := 0;
-    FHasFrequency := False;
-    FHasMetric := False;
-  finally
-    FLock.Leave;
+  { 1. 新規のコールバックを断る。在席カウンタより先に立てること。 }
+  FShuttingDown := True;
+
+  { 2. 既に入ってきているコールバックが抜けるのを待つ。
+       これを待たずに FLock.Free すると、PushEvent の FLock.Enter で
+       待っているワーカーが解放済みロックを掴む。 }
+  waited := 0;
+  repeat
+    idle := InterlockedCompareExchange(FInFlight, 0, 0) = 0;
+    if idle then Break;
+    Sleep(1);
+    Inc(waited);
+  until waited >= QUIESCE_TIMEOUT_MS;
+
+  { 3. 溜まっている分を捨てる }
+  if idle then
+  begin
+    FLock.Enter;
+    try
+      FQCount := 0;
+      FQHead := 0;
+      FHasFrequency := False;
+      FHasMetric := False;
+    finally
+      FLock.Leave;
+    end;
   end;
 
-  { 購読を外して、これ以上イベントが来ないようにする }
+  { 4. 購読を外して、これ以上イベントが来ないようにする }
   DetachModem;
   DetachEngine;
 
-  { 未処理の DrainToUi をキューから取り除く }
+  { 5. 未処理の DrainToUi をキューから取り除く }
   TThread.RemoveQueuedEvents(@DrainToUi);
 
-  FLock.Free;
+  { 6. 静止が確認できたときだけロックを解放する。
+       2 秒待っても抜けてこないのは既に異常事態 (ワーカーがハングしている)
+       であり、この後 inherited Destroy が Self を解放してしまう以上、
+       ロックを残しても完全には救えない。それでも「解放済みロックを掴む」
+       という即死のパターンだけは避けられるので、あえて漏らす。 }
+  if idle then
+    FLock.Free;
   inherited Destroy;
 end;
 
@@ -239,6 +296,19 @@ begin
   finally
     FLock.Leave;
   end;
+end;
+
+function TModemUI.EnterCallback: Boolean;
+begin
+  InterlockedIncrement(FInFlight);
+  Result := not FShuttingDown;
+  if not Result then
+    InterlockedDecrement(FInFlight);
+end;
+
+procedure TModemUI.LeaveCallback;
+begin
+  InterlockedDecrement(FInFlight);
 end;
 
 procedure TModemUI.ScheduleDrain;
@@ -255,25 +325,30 @@ procedure TModemUI.PushEvent(AKind: TUiEventKind; AIntValue: Integer;
 var
   idx: Integer;
 begin
-  FLock.Enter;
+  if not EnterCallback then Exit;
   try
-    if FShuttingDown then Exit;
-    if FQCount >= Length(FQueue) then
-    begin
-      { 溢れた場合は最も古いものを捨てる (最新の受信内容を優先する)。
-        黙って捨てず件数を記録し、DroppedEventCount で検出できるようにする。 }
-      FQHead := (FQHead + 1) mod Length(FQueue);
-      Dec(FQCount);
-      Inc(FDropped);
+    FLock.Enter;
+    try
+      if FShuttingDown then Exit;
+      if FQCount >= Length(FQueue) then
+      begin
+        { 溢れた場合は最も古いものを捨てる (最新の受信内容を優先する)。
+          黙って捨てず件数を記録し、DroppedEventCount で検出できるようにする。 }
+        FQHead := (FQHead + 1) mod Length(FQueue);
+        Dec(FQCount);
+        Inc(FDropped);
+      end;
+      idx := (FQHead + FQCount) mod Length(FQueue);
+      FQueue[idx].Kind := AKind;
+      FQueue[idx].IntValue := AIntValue;
+      FQueue[idx].StrValue := AStrValue;
+      Inc(FQCount);
+      ScheduleDrain;
+    finally
+      FLock.Leave;
     end;
-    idx := (FQHead + FQCount) mod Length(FQueue);
-    FQueue[idx].Kind := AKind;
-    FQueue[idx].IntValue := AIntValue;
-    FQueue[idx].StrValue := AStrValue;
-    Inc(FQCount);
-    ScheduleDrain;
   finally
-    FLock.Leave;
+    LeaveCallback;
   end;
 end;
 
@@ -394,13 +469,18 @@ procedure TModemUI.ModemFrequencyChanged(Sender: TCustomModem; AFrequency: Doubl
 begin
   // fldigi: REQ(put_freq, frequency);
   // 周波数は「最新値だけ表示できればよい」ので意図的に合流させる (UI-01)。
-  FLock.Enter;
+  if not EnterCallback then Exit;
   try
-    FLatestFrequency := AFrequency;
-    FHasFrequency := True;
-    ScheduleDrain;
+    FLock.Enter;
+    try
+      FLatestFrequency := AFrequency;
+      FHasFrequency := True;
+      ScheduleDrain;
+    finally
+      FLock.Leave;
+    end;
   finally
-    FLock.Leave;
+    LeaveCallback;
   end;
 end;
 
@@ -408,13 +488,18 @@ procedure TModemUI.ModemMetricChanged(Sender: TCustomModem; AMetric: Double);
 begin
   // fldigi: REQ(callback_set_metric, m);
   // メトリックも最新値のみで足りるため合流させる (UI-01)。
-  FLock.Enter;
+  if not EnterCallback then Exit;
   try
-    FLatestMetric := AMetric;
-    FHasMetric := True;
-    ScheduleDrain;
+    FLock.Enter;
+    try
+      FLatestMetric := AMetric;
+      FHasMetric := True;
+      ScheduleDrain;
+    finally
+      FLock.Leave;
+    end;
   finally
-    FLock.Leave;
+    LeaveCallback;
   end;
 end;
 
@@ -437,10 +522,14 @@ begin
     キューイングすると送信タイミングが崩れる。そのため、
     OnGetTxChar はスレッドセーフな実装であることを呼び出し元
     (フォーム) に要求した上で、直接呼び出す (Queueしない)。 }
-  if Assigned(FOnGetTxChar) then
-    Result := FOnGetTxChar(Self)
-  else
-    Result := MODEM_TX_CHAR_ETX;
+  Result := MODEM_TX_CHAR_ETX;
+  if not EnterCallback then Exit;
+  try
+    if Assigned(FOnGetTxChar) then
+      Result := FOnGetTxChar(Self);
+  finally
+    LeaveCallback;
+  end;
 end;
 
 procedure TModemUI.EngineStateChanged(Sender: TModemEngine; AState: TTrxState);
