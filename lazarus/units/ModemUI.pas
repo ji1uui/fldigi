@@ -49,9 +49,18 @@ unit ModemUI;
 interface
 
 uses
-  Classes, SysUtils, Modem, ModemEngine, ModemTypes;
+  Classes, SysUtils, SyncObjs, Modem, ModemEngine, ModemTypes;
 
 type
+  { FIFO に積むイベントの種別 (UI-01)。 }
+  TUiEventKind = (uekRxChar, uekState, uekStatus, uekError);
+
+  TUiEvent = record
+    Kind: TUiEventKind;
+    IntValue: Integer;   // uekRxChar: 文字コード / uekState: Ord(TTrxState)
+    StrValue: string;    // uekStatus / uekError
+  end;
+
   TModemUI = class;
 
   { GUI 側 (フォーム) が実装するコールバック群。
@@ -97,27 +106,45 @@ type
     procedure EngineStateChanged(Sender: TModemEngine; AState: TTrxState);
     procedure EngineError(Sender: TModemEngine; const AMsg: string);
 
-    // --- TThread.Queue に渡す「メインスレッドで実行される」中継関数 ---
-    // FPC の TThread.Queue は引数なし手続きしか積めないため、
-    // 直近の値を一時変数に保持してから Queue する定石パターンを用いる。
-    procedure QueuedFrequencyChanged;
-    procedure QueuedMetricChanged;
-    procedure QueuedStatusText;
-    procedure QueuedRxChar;
-    procedure QueuedStateChanged;
-    procedure QueuedError;
+    { --- UI-01/UI-02: スレッド安全な有界FIFO + 単一ドレイン方式 ---
+      旧実装は各イベントが単一の FPending* を上書きしてから同じ無引数
+      メソッドを Queue していた。復調文字のように短時間に複数届く値では、
+      メインスレッドが取り出す前に後続の値で上書きされ、
+      「前の文字が消え、後の文字が二重に届く」ことが起きていた。
+      さらに string 型の FPending* はワーカー書込みと GUI 読取りが競合し、
+      参照カウントを壊す危険もあった。
+
+      対策として、順序と個数を保つ必要のあるイベント (RX文字/状態/
+      ステータス/エラー) はロック付きFIFOへ積み、最新値だけでよい
+      イベント (周波数/メトリック) は意図的に「最新1件」へ合流させる。
+      Queue するのは DrainToUi 1種類だけで、しかも未処理の
+      ドレインが無いときだけ積む (FDrainScheduled) ので、
+      キューが膨張しない。 }
+    procedure DrainToUi;
+    procedure ScheduleDrain;
 
   private
-    // Queue 経由で受け渡すための一時バッファ (スレッドをまたぐ単純代入のみ)
-    FPendingFrequency: Double;
-    FPendingMetric: Double;
-    FPendingStatus: string;
-    FPendingRxChar: Integer;
-    FPendingState: TTrxState;
-    FPendingErrorMsg: string;
+    FLock: TCriticalSection;
+    FQueue: array of TUiEvent;      // 有界FIFO (順序保持が必要なイベント)
+    FQHead, FQCount: Integer;
+    FDropped: Int64;                // 溢れて捨てた件数 (診断用)
+    FDrainScheduled: Boolean;
+    FShuttingDown: Boolean;
+
+    { 合流させる最新値 (順序を保つ必要がないもの) }
+    FLatestFrequency: Double;
+    FHasFrequency: Boolean;
+    FLatestMetric: Double;
+    FHasMetric: Boolean;
   public
     constructor Create;
     destructor Destroy; override;
+
+    { 順序保持が必要なイベントを FIFO へ積む。Attach したモデム/エンジンの
+      イベントハンドラが使う入口であり、テストからイベントを注入する
+      際にも利用する。ワーカースレッドから呼んで安全。 }
+    procedure PushEvent(AKind: TUiEventKind; AIntValue: Integer;
+      const AStrValue: string);
 
     { モデム/エンジンを購読対象として登録する。
       fldigi でいう「active_modem に対して各種フックを仕込む」処理。 }
@@ -143,24 +170,174 @@ type
         LCL コンポーネントに直接触れる実装をしてはならない
         (スレッドセーフなバッファ/キューを介すこと)。 }
     property OnGetTxChar: TUIGetTxCharFunc read FOnGetTxChar write FOnGetTxChar;
+
+    { 有界FIFOが溢れて捨てたイベント数 (0 が正常)。過負荷の検出用。 }
+    function DroppedEventCount: Int64;
   end;
 
 implementation
 
 { TModemUI }
 
+const
+  { 有界FIFOの容量。8000Hz の復調でも文字は毎秒数十字程度なので、
+    メインスレッドが一時的に固まっても十分吸収できる大きさ。
+    それでも溢れる場合は過負荷なので、古いものから捨てて件数を記録する。 }
+  UI_QUEUE_CAPACITY = 4096;
+
 constructor TModemUI.Create;
 begin
   inherited Create;
   FModem := nil;
   FEngine := nil;
+  FLock := TCriticalSection.Create;
+  SetLength(FQueue, UI_QUEUE_CAPACITY);
+  FQHead := 0;
+  FQCount := 0;
+  FDropped := 0;
+  FDrainScheduled := False;
+  FShuttingDown := False;
+  FHasFrequency := False;
+  FHasMetric := False;
 end;
 
 destructor TModemUI.Destroy;
+{ UI-02: TThread.Queue(nil, ...) は所有スレッドを結び付けないため、
+  破棄後もキューに残ったエントリがメインスレッドで実行され、
+  解放済み Self のメソッドを呼ぶ (UAF) 状態だった。
+  積むメソッドを DrainToUi 1 種類に統一したので、
+  RemoveQueuedEvents(TThreadMethod) でまとめて取り消せる。 }
 begin
+  { まず新規投入を止める }
+  FLock.Enter;
+  try
+    FShuttingDown := True;
+    FQCount := 0;
+    FQHead := 0;
+    FHasFrequency := False;
+    FHasMetric := False;
+  finally
+    FLock.Leave;
+  end;
+
+  { 購読を外して、これ以上イベントが来ないようにする }
   DetachModem;
   DetachEngine;
+
+  { 未処理の DrainToUi をキューから取り除く }
+  TThread.RemoveQueuedEvents(@DrainToUi);
+
+  FLock.Free;
   inherited Destroy;
+end;
+
+function TModemUI.DroppedEventCount: Int64;
+begin
+  FLock.Enter;
+  try
+    Result := FDropped;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TModemUI.ScheduleDrain;
+{ ロックを保持したまま呼ぶこと。未処理のドレインが無いときだけ
+  Queue へ積むので、イベントが大量に来てもキューは1件しか使わない。 }
+begin
+  if FShuttingDown or FDrainScheduled then Exit;
+  FDrainScheduled := True;
+  TThread.Queue(nil, @DrainToUi);
+end;
+
+procedure TModemUI.PushEvent(AKind: TUiEventKind; AIntValue: Integer;
+  const AStrValue: string);
+var
+  idx: Integer;
+begin
+  FLock.Enter;
+  try
+    if FShuttingDown then Exit;
+    if FQCount >= Length(FQueue) then
+    begin
+      { 溢れた場合は最も古いものを捨てる (最新の受信内容を優先する)。
+        黙って捨てず件数を記録し、DroppedEventCount で検出できるようにする。 }
+      FQHead := (FQHead + 1) mod Length(FQueue);
+      Dec(FQCount);
+      Inc(FDropped);
+    end;
+    idx := (FQHead + FQCount) mod Length(FQueue);
+    FQueue[idx].Kind := AKind;
+    FQueue[idx].IntValue := AIntValue;
+    FQueue[idx].StrValue := AStrValue;
+    Inc(FQCount);
+    ScheduleDrain;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TModemUI.DrainToUi;
+{ メインスレッドで実行される唯一の中継処理。
+  FIFO を空になるまで取り出し、順序どおりにフォーム側へ渡す。 }
+var
+  ev: TUiEvent;
+  freq, metric: Double;
+  haveFreq, haveMetric, haveEvent: Boolean;
+begin
+  FLock.Enter;
+  try
+    FDrainScheduled := False;
+    if FShuttingDown then Exit;
+  finally
+    FLock.Leave;
+  end;
+
+  { --- 合流させた最新値 (周波数/メトリック) --- }
+  FLock.Enter;
+  try
+    haveFreq := FHasFrequency;
+    freq := FLatestFrequency;
+    FHasFrequency := False;
+    haveMetric := FHasMetric;
+    metric := FLatestMetric;
+    FHasMetric := False;
+  finally
+    FLock.Leave;
+  end;
+  if haveFreq and Assigned(FOnFrequencyChanged) then
+    FOnFrequencyChanged(Self, freq);
+  if haveMetric and Assigned(FOnMetricChanged) then
+    FOnMetricChanged(Self, metric);
+
+  { --- 順序保持が必要なイベント --- }
+  repeat
+    FLock.Enter;
+    try
+      haveEvent := (FQCount > 0) and (not FShuttingDown);
+      if haveEvent then
+      begin
+        ev := FQueue[FQHead];
+        FQueue[FQHead].StrValue := '';   // 参照を残さない
+        FQHead := (FQHead + 1) mod Length(FQueue);
+        Dec(FQCount);
+      end;
+    finally
+      FLock.Leave;
+    end;
+    if not haveEvent then Break;
+
+    case ev.Kind of
+      uekRxChar:
+        if Assigned(FOnRxChar) then FOnRxChar(Self, ev.IntValue);
+      uekState:
+        if Assigned(FOnStateChanged) then FOnStateChanged(Self, TTrxState(ev.IntValue));
+      uekStatus:
+        if Assigned(FOnStatusText) then FOnStatusText(Self, ev.StrValue);
+      uekError:
+        if Assigned(FOnError) then FOnError(Self, ev.StrValue);
+    end;
+  until False;
 end;
 
 procedure TModemUI.AttachModem(AModem: TCustomModem);
@@ -216,29 +393,42 @@ end;
 procedure TModemUI.ModemFrequencyChanged(Sender: TCustomModem; AFrequency: Double);
 begin
   // fldigi: REQ(put_freq, frequency);
-  FPendingFrequency := AFrequency;
-  TThread.Queue(nil, @QueuedFrequencyChanged);
+  // 周波数は「最新値だけ表示できればよい」ので意図的に合流させる (UI-01)。
+  FLock.Enter;
+  try
+    FLatestFrequency := AFrequency;
+    FHasFrequency := True;
+    ScheduleDrain;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 procedure TModemUI.ModemMetricChanged(Sender: TCustomModem; AMetric: Double);
 begin
   // fldigi: REQ(callback_set_metric, m);
-  FPendingMetric := AMetric;
-  TThread.Queue(nil, @QueuedMetricChanged);
+  // メトリックも最新値のみで足りるため合流させる (UI-01)。
+  FLock.Enter;
+  try
+    FLatestMetric := AMetric;
+    FHasMetric := True;
+    ScheduleDrain;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 procedure TModemUI.ModemStatusText(Sender: TCustomModem; const AText: string);
 begin
   // fldigi: put_Status1(msg) / put_MODEstatus(...)
-  FPendingStatus := AText;
-  TThread.Queue(nil, @QueuedStatusText);
+  PushEvent(uekStatus, 0, AText);
 end;
 
 procedure TModemUI.ModemPutRxChar(Sender: TCustomModem; ACh: Integer);
 begin
   // fldigi: put_rx_char(c) -- 復調文字を受信ウィンドウへ
-  FPendingRxChar := ACh;
-  TThread.Queue(nil, @QueuedRxChar);
+  // 文字は 1 字も落とさず順序も守る必要があるため FIFO へ積む (UI-01)。
+  PushEvent(uekRxChar, ACh, '');
 end;
 
 function TModemUI.ModemGetTxChar(Sender: TCustomModem): Integer;
@@ -255,52 +445,13 @@ end;
 
 procedure TModemUI.EngineStateChanged(Sender: TModemEngine; AState: TTrxState);
 begin
-  FPendingState := AState;
-  TThread.Queue(nil, @QueuedStateChanged);
+  { 状態遷移は履歴として意味があるので合流させず FIFO へ積む。 }
+  PushEvent(uekState, Ord(AState), '');
 end;
 
 procedure TModemUI.EngineError(Sender: TModemEngine; const AMsg: string);
 begin
-  FPendingErrorMsg := AMsg;
-  TThread.Queue(nil, @QueuedError);
-end;
-
-{ ---- Queue 経由でメインスレッド上で実行される中継処理 ---- }
-
-procedure TModemUI.QueuedFrequencyChanged;
-begin
-  if Assigned(FOnFrequencyChanged) then
-    FOnFrequencyChanged(Self, FPendingFrequency);
-end;
-
-procedure TModemUI.QueuedMetricChanged;
-begin
-  if Assigned(FOnMetricChanged) then
-    FOnMetricChanged(Self, FPendingMetric);
-end;
-
-procedure TModemUI.QueuedStatusText;
-begin
-  if Assigned(FOnStatusText) then
-    FOnStatusText(Self, FPendingStatus);
-end;
-
-procedure TModemUI.QueuedRxChar;
-begin
-  if Assigned(FOnRxChar) then
-    FOnRxChar(Self, FPendingRxChar);
-end;
-
-procedure TModemUI.QueuedStateChanged;
-begin
-  if Assigned(FOnStateChanged) then
-    FOnStateChanged(Self, FPendingState);
-end;
-
-procedure TModemUI.QueuedError;
-begin
-  if Assigned(FOnError) then
-    FOnError(Self, FPendingErrorMsg);
+  PushEvent(uekError, 0, AMsg);
 end;
 
 end.

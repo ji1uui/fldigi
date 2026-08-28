@@ -122,6 +122,10 @@ begin
   WriteLn;
 
   Sound := TNullSoundDevice.Create;
+  { 実運用と同じく、エンジンへ渡す前にデバイスを開いておく。
+    (以前は開かずに渡しており、未オープンのデバイスへ読み書きするという
+     契約違反をテストが再現していなかった。) }
+  Sound.Open(sdRead, 8000);
   NullModem := TNullModem.Create(Sound);
   Engine := TModemEngine.Create(Sound, Sound);
   UI := TModemUI.Create;
@@ -184,8 +188,13 @@ begin
   WriteLn(Format('周波数通知回数 = %d, 状態通知回数 = %d', [Form.FreqCount, Form.StateCount]));
   WriteLn('=== テスト完了 ===');
 
-  Engine.Free;
+  { APP-01: 破棄順序を本体 (UnitMainForm.Destroy) と揃える。
+    UI を先に切り離さずにエンジンを解放すると、TModemUI.Destroy ->
+    DetachEngine が解放済みエンジンへ書き込む use-after-free になる。
+    以前のテストはこの順序を再現したまま成功終了していたため、
+    欠陥を見逃していた。 }
   UI.Free;
+  Engine.Free;
   Form.Free;
   NullModem.Free;
   Sound.Free;

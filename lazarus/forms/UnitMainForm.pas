@@ -126,16 +126,31 @@ begin
 end;
 
 destructor TMainForm.Destroy;
+{ APP-01: 以前は FEngine.Free の後に FUI.Free していたため、
+  TModemUI.Destroy -> DetachEngine が解放済みエンジンのイベントへ
+  書き込む use-after-free になっていた。
+  正しい順序は「UI を先に切り離す (キューに残った通知も取り消す)
+  -> エンジンを停止・破棄 -> モデム/デバイスを破棄」。 }
 begin
+  { 1. まず UI を切り離す。以降エンジン/モデムからの通知は来ないし、
+       Queue に残っていた分も TModemUI.Destroy が取り消す。 }
+  FUI.Free;
+  FUI := nil;
+
+  { 2. エンジンを停止して破棄する。 }
   if Assigned(FEngine) then
   begin
-    FEngine.RequestExit;
+    FEngine.RequestExit;   // ブロッキングI/Oの解除も行う (ENG-04)
     FEngine.WaitFor;
     FEngine.Free;
+    FEngine := nil;
   end;
-  FUI.Free;
+
+  { 3. エンジンが完全に止まってからモデムとデバイスを解放する。 }
   FModem.Free;
+  FModem := nil;
   FSound.Free;
+  FSound := nil;
   FTxLock.Free;
   inherited Destroy;
 end;

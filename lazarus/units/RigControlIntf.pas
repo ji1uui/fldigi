@@ -103,8 +103,14 @@ type
     FIsOpen: Boolean;
     FPollIntervalMs: Integer;
     FPttOnDataMode: Boolean;
+    FPttAsserted: Boolean;   // RIG-11: 自分が送信を ON にしたか
   protected
     property IsOpenFlag: Boolean read FIsOpen write FIsOpen;
+
+    { RIG-11: 派生クラスは SetPTT の実装内で、実際に PTT を操作した後に
+      これを呼んで状態を記録すること。EnsurePttOff はこの記録を見て
+      「自分が上げた送信」だけを確実に下ろす。 }
+    procedure NotePttState(AOn: Boolean);
   public
     constructor Create; virtual;
     destructor Destroy; override;
@@ -130,6 +136,21 @@ type
       virtual; abstract;
     function CanSetMode: Boolean; virtual; abstract;
     function CanGetMode: Boolean; virtual; abstract;
+
+    { RIG-11: 送信の後始末を保証するフェイルセーフ。
+      例外・アプリ終了・デバイス障害のいずれの経路でも、送信状態のまま
+      無線機を放置しないために使う。失敗しても例外を投げない
+      (デストラクタや except 節から安全に呼べる)。
+      戻り値: PTT を下ろせたか (元から送信していなければ True)。 }
+    function EnsurePttOff: Boolean;
+
+    { RIG-11: 送信を伴う処理を安全に囲むためのヘルパー。
+      ATransmitProc の実行中に例外が出ても、必ず PTT を下ろしてから
+      例外を再送出する。呼び出し側の finally 書き忘れを防ぐ。 }
+    procedure TransmitGuarded(ATransmitProc: TProcedure);
+
+    { 自分が送信を ON にしている状態か (フェイルセーフの判定用)。 }
+    property PttAsserted: Boolean read FPttAsserted;
 
     { --- PTT (fldigi: Rig::setPTT()/getPTT()) --- }
     procedure SetPTT(OnOff: Boolean; Vfo: TRigVfoSel = rvCurrent); virtual; abstract;
@@ -239,10 +260,51 @@ begin
 end;
 
 destructor TCustomRigControl.Destroy;
+{ RIG-11: 破棄経路でも必ず送信を止める。Close より先に PTT を下ろすのは、
+  Close で通信路が閉じてしまうと PTT を操作できなくなるため。 }
 begin
+  EnsurePttOff;
   if FIsOpen then
-    Close;
+  begin
+    try
+      Close;
+    except
+      on E: Exception do ; // 破棄中の例外は伝播させない
+    end;
+  end;
   inherited Destroy;
+end;
+
+procedure TCustomRigControl.NotePttState(AOn: Boolean);
+begin
+  FPttAsserted := AOn;
+end;
+
+function TCustomRigControl.EnsurePttOff: Boolean;
+begin
+  Result := True;
+  if not FPttAsserted then Exit;   // 自分は送信していない
+  try
+    if FIsOpen and CanSetPTT then
+      SetPTT(False);
+    FPttAsserted := False;
+  except
+    on E: Exception do
+    begin
+      { ここで例外を投げると、呼び出し元 (デストラクタや except 節) の
+        後始末が止まってしまう。送信が残っている可能性は戻り値で伝える。 }
+      Result := False;
+    end;
+  end;
+end;
+
+procedure TCustomRigControl.TransmitGuarded(ATransmitProc: TProcedure);
+begin
+  try
+    ATransmitProc();
+  finally
+    EnsurePttOff;
+  end;
 end;
 
 function TCustomRigControl.IsOnLine: Boolean;
@@ -341,6 +403,7 @@ end;
 procedure TNullRigControl.SetPTT(OnOff: Boolean; Vfo: TRigVfoSel);
 begin
   FPtt := OnOff;
+  NotePttState(OnOff);   // RIG-11: フェイルセーフが状態を追えるようにする
 end;
 
 function TNullRigControl.GetPTT(Vfo: TRigVfoSel): Boolean;

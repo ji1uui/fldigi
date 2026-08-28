@@ -84,8 +84,23 @@ type
     FResolvedDeviceIndex: PaDeviceIndex;
     FLatencySec: Double;      // fldigi: progdefaults.txoffset 相当ではないが、
                                // suggestedLatency (既定 0.1秒 = 低レイテンシ)
+    { --- ストリーム寿命と入出力の直列化 (AUD-07) ---
+      Close/AbortIO と Read/Write が同じハンドルを同時に触らないようにする。
+      ただしブロッキング中の Pa_ReadStream をロックの中で行うと AbortIO 側が
+      待たされて解除できないため、「ハンドルの取得・差し替えだけをロックで
+      守り、実際の入出力はロック外で行う」方式を採る。入出力中のスレッド数を
+      FIoActive で数え、Close はそれが 0 になるまで実解放を遅らせる。 }
+    FLock: TCriticalSection;
+    FIoActive: Integer;       // ブロッキング入出力を実行中のスレッド数
+    FClosing: Boolean;        // Close/AbortIO 進行中 (新規の入出力を拒む)
     function FindDeviceIndex(const ANamePart: string; ANeedInput: Boolean): PaDeviceIndex;
     procedure CheckPaError(AErr: PaError; const AContext: string);
+    { 入出力を開始してよければ True を返し、使用するハンドルを AStream に
+      設定して FIoActive を 1 増やす。呼び出し側は必ず EndIo を呼ぶこと。 }
+    function BeginIo(out AStream: PPaStream): Boolean;
+    procedure EndIo;
+    { 実行中の入出力がすべて抜けるまで待つ (最大 ATimeoutMs)。 }
+    procedure WaitForIoIdle(ATimeoutMs: Integer);
   public
     constructor Create; override;
     constructor Create(const ADeviceName: string); reintroduce;
@@ -188,15 +203,68 @@ begin
   FStream := nil;
   FResolvedDeviceIndex := paNoDevice;
   FLatencySec := 0.1; // 既定 100ms (fldigi の defaultLowLatency相当より少し安全側)
+  FLock := TCriticalSection.Create;
+  FIoActive := 0;
+  FClosing := False;
   PaRefAcquire;
 end;
 
 destructor TPortAudioSoundDevice.Destroy;
 begin
-  if IsOpen then
-    Close;
+  { AUD-04/AUD-07: IsOpen だけを見て Close を飛ばすと、Pa_StartStream 失敗後や
+    AbortIO 後に「IsOpen=False なのにストリームは開いたまま」という状態を
+    取りこぼし、開いたまま Pa_Terminate へ進んでいた。ハンドルの有無で判断する。 }
+  Close;
   PaRefRelease;
+  FLock.Free;
   inherited Destroy;
+end;
+
+function TPortAudioSoundDevice.BeginIo(out AStream: PPaStream): Boolean;
+begin
+  FLock.Enter;
+  try
+    Result := (FStream <> nil) and IsOpen and (not FClosing);
+    if Result then
+    begin
+      AStream := FStream;
+      Inc(FIoActive);
+    end
+    else
+      AStream := nil;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TPortAudioSoundDevice.EndIo;
+begin
+  FLock.Enter;
+  try
+    if FIoActive > 0 then
+      Dec(FIoActive);
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TPortAudioSoundDevice.WaitForIoIdle(ATimeoutMs: Integer);
+var
+  waited: Integer;
+  busy: Boolean;
+begin
+  waited := 0;
+  repeat
+    FLock.Enter;
+    try
+      busy := FIoActive > 0;
+    finally
+      FLock.Leave;
+    end;
+    if not busy then Exit;
+    Sleep(1);
+    Inc(waited);
+  until waited >= ATimeoutMs;
 end;
 
 procedure TPortAudioSoundDevice.CheckPaError(AErr: PaError; const AContext: string);
@@ -250,16 +318,19 @@ var
   ErrCode: PaError;
   IsInput: Boolean;
   di: PPaDeviceInfo;
+  LocalStream: PPaStream;
 begin
   Result := False;
-  if IsOpen then
-    Close;
+  Close;
 
   FDirection := Direction;
   IsInput := (Direction = sdRead);
   FResolvedDeviceIndex := FindDeviceIndex(FDeviceName, IsInput);
   if FResolvedDeviceIndex = paNoDevice then
     raise EPortAudioError.Create(PaError(-1), 'FindDeviceIndex (デバイスが見つからない)');
+
+  if Channels < 1 then
+    raise ESoundError.CreateFmt('チャネル数が不正です: %d', [Channels]);
 
   FillChar(Params, SizeOf(Params), 0);
   Params.device := FResolvedDeviceIndex;
@@ -270,108 +341,215 @@ begin
 
   di := Pa_GetDeviceInfo(FResolvedDeviceIndex);
   if di <> nil then
-    Params.suggestedLatency := di^.defaultLowInputLatency; // 概算、後段で上書き可
+  begin
+    { AUD-03: 出力にも defaultLowInputLatency を使っていたため、出力側の
+      レイテンシ指定が実態と合っていなかった。方向ごとの既定値を使う。 }
+    if IsInput then
+      Params.suggestedLatency := di^.defaultLowInputLatency
+    else
+      Params.suggestedLatency := di^.defaultLowOutputLatency;
+    if (IsInput and (di^.maxInputChannels < Channels)) or
+       ((not IsInput) and (di^.maxOutputChannels < Channels)) then
+      raise ESoundError.CreateFmt(
+        'デバイスが要求チャネル数に対応していません (要求 %d)', [Channels]);
+  end;
 
+  { AUD-04: ローカルハンドルで組み立て、全段成功して初めてコミットする。
+    以前は Pa_OpenStream 成功後に Pa_StartStream が失敗すると、FStream に
+    ハンドルが残ったまま IsOpen は False になり、デストラクタが Close を
+    飛ばして「開いたまま Pa_Terminate」になっていた。 }
+  LocalStream := nil;
   if IsInput then
-    ErrCode := Pa_OpenStream(FStream, @Params, nil, ASampleRate,
+    ErrCode := Pa_OpenStream(LocalStream, @Params, nil, ASampleRate,
       paFramesPerBufferUnspecified, 0, nil, nil)
   else
-    ErrCode := Pa_OpenStream(FStream, nil, @Params, ASampleRate,
+    ErrCode := Pa_OpenStream(LocalStream, nil, @Params, ASampleRate,
       paFramesPerBufferUnspecified, 0, nil, nil);
   CheckPaError(ErrCode, 'Pa_OpenStream');
 
-  ErrCode := Pa_StartStream(FStream);
-  CheckPaError(ErrCode, 'Pa_StartStream');
+  ErrCode := Pa_StartStream(LocalStream);
+  if ErrCode <> paNoError then
+  begin
+    { 開いてしまったストリームを必ず片付けてから例外にする。 }
+    Pa_CloseStream(LocalStream);
+    raise EPortAudioError.Create(ErrCode, 'Pa_StartStream');
+  end;
 
-  SampleRate := ASampleRate;
-  IsOpenFlag := True;
+  FLock.Enter;
+  try
+    FStream := LocalStream;
+    FClosing := False;
+    SampleRate := ASampleRate;
+    IsOpenFlag := True;
+  finally
+    FLock.Leave;
+  end;
   Result := True;
 end;
 
 procedure TPortAudioSoundDevice.Close;
+{ AUD-07: ブロッキング入出力中に呼ばれても安全に閉じる。
+  手順は「新規入出力を止める → 実行中のブロッキング呼び出しを
+  Pa_AbortStream で解除する → 全員が抜けるまで待つ → 実際に閉じる」。
+  実行中スレッドはローカルにハンドルを保持しているため、最後まで
+  待ってから Pa_CloseStream しないと解放済みハンドルを触ることになる。 }
+var
+  h: PPaStream;
 begin
-  if FStream <> nil then
-  begin
-    Pa_StopStream(FStream); // エラーは無視 (fldigi: Close() も戻り値を見ない)
-    Pa_CloseStream(FStream);
-    FStream := nil;
+  FLock.Enter;
+  try
+    h := FStream;
+    FStream := nil;        // これ以降の BeginIo は失敗する
+    FClosing := True;
+    IsOpenFlag := False;
+  finally
+    FLock.Leave;
   end;
-  IsOpenFlag := False;
+
+  if h = nil then
+  begin
+    FLock.Enter;
+    try
+      FClosing := False;
+    finally
+      FLock.Leave;
+    end;
+    Exit;
+  end;
+
+  { ブロッキング中の Pa_ReadStream/Pa_WriteStream を解除する。
+    戻り値は見ない (既に停止しているケースもあるため)。 }
+  Pa_AbortStream(h);
+  WaitForIoIdle(2000);
+
+  Pa_StopStream(h);   // エラーは無視 (fldigi: Close() も戻り値を見ない)
+  Pa_CloseStream(h);
+
+  FLock.Enter;
+  try
+    FClosing := False;
+  finally
+    FLock.Leave;
+  end;
 end;
 
 procedure TPortAudioSoundDevice.AbortIO;
+{ AUD-07: 以前は Pa_AbortStream を呼んで IsOpen=False にするだけで、
+  ハンドルを閉じalso nil 化もしていなかった。結果、その後デストラクタが
+  Close を飛ばし、開いたままのストリームを残して Pa_Terminate に進んでいた。
+  AbortIO は「ブロッキング入出力を直ちに解除して閉じる」と定義し、
+  Close に処理を委ねる。 }
 begin
-  if FStream <> nil then
-    Pa_AbortStream(FStream);
-  IsOpenFlag := False;
+  Close;
 end;
 
 function TPortAudioSoundDevice.ReadSamples(var Buf: array of Double;
   Count: Integer): Integer;
+{ AUD-06: Pa_ReadStream の第3引数は「サンプル数」ではなく「フレーム数」で、
+  実際には frames x Channels 個のサンプルが書き込まれる。以前は Count 個
+  しか確保していなかったため、Channels>1 でヒープを破壊していた。
+  多チャネル入力からは先頭チャネル (ch0) を取り出してモノラルとして返す。
+  AUD-05: Count の範囲検査も行う。 }
 var
   FBuf: array of Single;
-  i: Integer;
+  i, ch: Integer;
   ErrCode: PaError;
+  h: PPaStream;
 begin
   Result := 0;
-  if (FStream = nil) or (not IsOpen) then Exit;
+  if not ValidateIoCount(Count, Length(Buf), 'ReadSamples') then Exit;
+  if not BeginIo(h) then Exit;
+  try
+    ch := Channels;
+    if ch < 1 then ch := 1;
+    SetLength(FBuf, Count * ch);
 
-  SetLength(FBuf, Count);
-  ErrCode := Pa_ReadStream(FStream, @FBuf[0], culong(Count));
-  // paInputOverflowed はデータ自体は取得できているため致命的エラーとしない
-  // (fldigi: SoundPort::Read も同様に overflow を許容してログのみ出す)
-  if (ErrCode <> paNoError) and (ErrCode <> paInputOverflowed) then
-    raise EPortAudioError.Create(ErrCode, 'Pa_ReadStream');
+    ErrCode := Pa_ReadStream(h, @FBuf[0], culong(Count));
+    // paInputOverflowed はデータ自体は取得できているため致命的エラーとしない
+    // (fldigi: SoundPort::Read も同様に overflow を許容してログのみ出す)
+    if (ErrCode <> paNoError) and (ErrCode <> paInputOverflowed) then
+      raise EPortAudioError.Create(ErrCode, 'Pa_ReadStream');
 
-  for i := 0 to Count - 1 do
-    Buf[i] := FBuf[i];
-  Result := Count;
+    for i := 0 to Count - 1 do
+      Buf[i] := FBuf[i * ch];   // インターリーブの先頭チャネル
+    Result := Count;
+  finally
+    EndIo;
+  end;
 end;
 
 function TPortAudioSoundDevice.WriteSamples(const Buf: array of Double;
   Count: Integer): Integer;
+{ AUD-06: Pa_WriteStream もフレーム単位なので、Channels>1 のストリームへは
+  frames x Channels 個のサンプルを渡す必要がある。以前は多チャネル時に
+  インターリーブせず Count 個だけ渡していたため、再生内容が壊れていた。
+  モノラル入力は全チャネルへ複製する。 }
 var
   FBuf: array of Single;
-  i: Integer;
+  i, c, ch: Integer;
   ErrCode: PaError;
+  h: PPaStream;
 begin
   Result := 0;
-  if (FStream = nil) or (not IsOpen) then Exit;
+  if not ValidateIoCount(Count, Length(Buf), 'WriteSamples') then Exit;
+  if not BeginIo(h) then Exit;
+  try
+    ch := Channels;
+    if ch < 1 then ch := 1;
+    SetLength(FBuf, Count * ch);
+    for i := 0 to Count - 1 do
+      for c := 0 to ch - 1 do
+        FBuf[i * ch + c] := Buf[i];
 
-  SetLength(FBuf, Count);
-  for i := 0 to Count - 1 do
-    FBuf[i] := Buf[i];
+    ErrCode := Pa_WriteStream(h, @FBuf[0], culong(Count));
+    if (ErrCode <> paNoError) and (ErrCode <> paOutputUnderflowed) then
+      raise EPortAudioError.Create(ErrCode, 'Pa_WriteStream');
 
-  ErrCode := Pa_WriteStream(FStream, @FBuf[0], culong(Count));
-  if (ErrCode <> paNoError) and (ErrCode <> paOutputUnderflowed) then
-    raise EPortAudioError.Create(ErrCode, 'Pa_WriteStream');
-
-  Result := Count;
+    Result := Count;
+  finally
+    EndIo;
+  end;
 end;
 
 function TPortAudioSoundDevice.WriteStereo(const BufL, BufR: array of Double;
   Count: Integer): Integer;
+{ AUD-06: 「Channels=2 でOpenされている前提」を検証していなかったため、
+  モノラルで開いたストリームへ 2 倍のデータを渡すと壊れていた。
+  両バッファの長さも検証する。 }
 var
   FBuf: array of Single;
   i: Integer;
   ErrCode: PaError;
+  h: PPaStream;
 begin
   Result := 0;
-  if (FStream = nil) or (not IsOpen) then Exit;
+  if not ValidateIoCount(Count, Length(BufL), 'WriteStereo(L)') then Exit;
+  if Count > Length(BufR) then
+    raise ESoundError.CreateFmt(
+      'WriteStereo: R チャネルのバッファ長が不足しています (要求 %d / バッファ %d)',
+      [Count, Length(BufR)]);
+  if Channels <> 2 then
+    raise ESoundError.CreateFmt(
+      'WriteStereo にはステレオ (Channels=2) で開いたストリームが必要です (現在 %d)',
+      [Channels]);
+  if not BeginIo(h) then Exit;
+  try
+    // インターリーブ (L,R,L,R,...) で書き込む
+    SetLength(FBuf, Count * 2);
+    for i := 0 to Count - 1 do
+    begin
+      FBuf[i * 2] := BufL[i];
+      FBuf[i * 2 + 1] := BufR[i];
+    end;
 
-  // インターリーブ (L,R,L,R,...) で書き込む (Channels=2 でOpenされている前提)
-  SetLength(FBuf, Count * 2);
-  for i := 0 to Count - 1 do
-  begin
-    FBuf[i * 2] := BufL[i];
-    FBuf[i * 2 + 1] := BufR[i];
+    ErrCode := Pa_WriteStream(h, @FBuf[0], culong(Count));
+    if (ErrCode <> paNoError) and (ErrCode <> paOutputUnderflowed) then
+      raise EPortAudioError.Create(ErrCode, 'Pa_WriteStream (stereo)');
+
+    Result := Count;
+  finally
+    EndIo;
   end;
-
-  ErrCode := Pa_WriteStream(FStream, @FBuf[0], culong(Count));
-  if (ErrCode <> paNoError) and (ErrCode <> paOutputUnderflowed) then
-    raise EPortAudioError.Create(ErrCode, 'Pa_WriteStream (stereo)');
-
-  Result := Count;
 end;
 
 procedure TPortAudioSoundDevice.Flush;

@@ -102,9 +102,23 @@ begin
 end;
 
 destructor TRigPollThread.Destroy;
+{ RIG-01: 以前は FLock.Free を先に行っていたため、まだ走っている
+  ポーリングスレッドが解放済みのクリティカルセクションやイベントを
+  触りえた (inherited Destroy が Terminate/WaitFor を行うのはその "後")。
+  正しい順序は「終了要求 → スレッド停止を待つ → 資源解放」。 }
 begin
-  FLock.Free;
-  inherited Destroy;
+  Terminate;
+  { 購読を外し、停止途中にフォーム側コールバックが呼ばれないようにする。 }
+  FLock.Enter;
+  try
+    FOnFreqChanged := nil;
+    FOnModeChanged := nil;
+    FOnError := nil;
+  finally
+    FLock.Leave;
+  end;
+  inherited Destroy;  // ここで Terminate / Resume / WaitFor が行われる
+  FLock.Free;         // スレッド停止が確定してから解放する
 end;
 
 function TRigPollThread.GetBypass: Boolean;
