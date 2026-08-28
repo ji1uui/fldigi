@@ -28,16 +28,20 @@ lazarus/
 │   ├── HamlibBindings.pas        Hamlib C API の直接バインディング
 │   ├── RigControlIntf.pas        無線機CAT制御の抽象基底 TCustomRigControl
 │   ├── HamlibRigControl.pas      Hamlib具象実装 THamlibRigControl
-│   └── RigPollThread.pas         リグ状態監視スレッド TRigPollThread (fldigi: hamlib_loop)
+│   ├── RigPollThread.pas         リグ状態監視スレッド TRigPollThread (fldigi: hamlib_loop)
+│   ├── StationInfo.pas           局情報 (コールサイン等) の記憶 (fldigi: progdefaults)
+│   ├── AdifUdpSender.pas         ADIF-over-UDP 外部ロガー連携
+│   └── QsoLogbook.pas            本アプリ内蔵QSOロギング (fldigi: cQsoDb)
 ├── forms/                  -- LCL (GUI) を使った実装例
 │   ├── UnitMainForm.pas    TForm 継承のメインフォーム実装例
 │   ├── DemoModemApp.lpr    デモアプリのエントリポイント
 │   └── DemoModemApp.lpi    Lazarus プロジェクトファイル
 └── test/
-    ├── test_modem.lpr       GUIなしの結合テスト (スレッド安全性を検証)
-    ├── test_rtty_cw.lpr     RTTY/CW 送受信ループバックテスト
-    ├── test_portaudio.lpr   PortAudio バインディングの動作確認テスト
-    └── test_rigcontrol.lpr  Hamlib CAT制御の動作確認テスト (疑似CAT通信)
+    ├── test_modem.lpr        GUIなしの結合テスト (スレッド安全性を検証)
+    ├── test_rtty_cw.lpr      RTTY/CW 送受信ループバックテスト
+    ├── test_portaudio.lpr    PortAudio バインディングの動作確認テスト
+    ├── test_rigcontrol.lpr   Hamlib CAT制御の動作確認テスト (疑似CAT通信)
+    └── test_station_adif.lpr 局情報記憶/ADIF-UDP送信/内蔵ロギングの動作確認テスト
 ```
 
 ## 1. モデムエンジン設計 (`TCustomModem` / `TModemEngine`)
@@ -616,3 +620,183 @@ fpc -Sood -Mobjfpc -Fuunits -FUunits -FEtest -o test/test_rigcontrol test/test_r
 - Hamlib の非同期通知機能 (async data / transceive mode、無線機側の
   周波数変化をポーリングなしでリアルタイム受信する機能) は未対応。
   `TRigPollThread` によるポーリング方式のみを実装している。
+
+## 7. 局情報の記憶 (`units/StationInfo.pas`) / ADIF-over-UDP 外部ロガー連携
+   (`units/AdifUdpSender.pas`) / 内蔵 QSO ロギング (`units/QsoLogbook.pas`)
+
+コールサイン・オペレータ名・運用地・グリッドロケータ等の運用情報を入力・
+記憶する機能と、確定した QSO を ADIF 形式で UDP 送信して外部ロギング
+アプリに配信する機能、および本アプリ内蔵の QSO ログ機能を実装した。
+
+### fldigi との対応表
+
+| fldigi (C++)                                    | Lazarus (Pascal)                       | 役割 |
+|----------------------------------------------------|-------------------------------------------|------|
+| `progdefaults` (`configuration.h` の `ELEM_` マクロ) | `TStationInfo` (StationInfo.pas)         | 局情報の保持 |
+| `progdefaults.myCall` (MYCALL)                     | `TStationInfo.MyCall`                     | 自局コールサイン |
+| `progdefaults.operCall` (OPERCALL)                 | `TStationInfo.OperCall`                   | 運用者コールサイン |
+| `progdefaults.myName` (MYNAME)                     | `TStationInfo.MyName`                     | 運用者名 |
+| `progdefaults.myQth` (MYQTH)                       | `TStationInfo.MyQth`                      | 運用地(QTH) |
+| `progdefaults.myLocator` (MYLOC)                   | `TStationInfo.MyLocator`                  | グリッドロケータ |
+| `progdefaults.myAntenna` (MYANTENNA)               | `TStationInfo.MyAntenna`                  | アンテナ情報 |
+| `fldigi_def.xml` への保存                          | `station_info.json` (JSON、実行ファイルと同じディレクトリ) | 局情報の永続化 |
+| `field_def.h` (`ADIF_FIELD_POS`)                   | `AdifUdpSender.pas` の `ADIF_TAG_*` 定数群 | ADIF タグ名の定義 |
+| `adif_io.cxx` の `FIELD fields[]`                  | (直接タグ名文字列として踏襲)              | enum値↔ADIFタグ名マッピング |
+| `adif_io.cxx` の `adifmt = "<%s:%d>"`               | `AdifField()` 関数                        | 1フィールドの書式整形 |
+| `cAdifIO::writeFile()` のヘッダ生成+フィールド出力  | `TAdifUdpSender.BuildAdifRecord()`        | 1QSO分のADIFレコード組み立て |
+| `class cQsoRec` (qso_db.h)                         | `TQsoRecord` (QsoLogbook.pas)             | 1件のQSO記録 |
+| `class cQsoDb` (qso_db.h/.cxx)                     | `TQsoLogbook` (QsoLogbook.pas)            | QSOログの集合・永続化 |
+| `logsupport.cxx` の `AddRecord()` (Station情報のQSOレコードへのコピー) | `TQsoLogbook.AddQso()` 内の `TAdifUdpSender.SendQso()` 呼び出し | QSO確定時の自局情報付与 |
+
+### なぜこの設計か (fldigi に前例が無い部分の設計根拠)
+
+fldigi のソースコードを詳細に調査した結果、以下が判明した:
+
+- **局情報の保持自体** は `progdefaults` (`configuration.h`) にそのまま
+  対応する構造がある。`myCall`/`operCall`/`myName`/`myQth`/`myLocator`/
+  `myAntenna` の6フィールドをそのまま `TStationInfo` に踏襲した。
+- **ADIF のタグ名・書式** も `field_def.h`/`adif_io.cxx` に確実な前例が
+  ある。`STATION_CALLSIGN`/`OPERATOR`/`MY_GRIDSQUARE`/`MY_CITY`/
+  `MY_ANTENNA` 等のタグ名、および `<TAG:長さ>値` という ADIF
+  フィールド書式 (`adifmt = "<%s:%d>"`) をそのまま踏襲することで、
+  fldigi の ADIF ファイルとの互換性・移行性を確保している。
+- 一方、**「ADIF データを UDP で外部送信する」ネイティブ機能は
+  fldigi 自体には存在しない** ことを確認した
+  (`maclogger.cxx`/`maclogger.h` は UDP *受信* 専用で、しかも ADIF では
+  なく `[Radio Report:...]` という独自のブラケット区切りテキスト形式。
+  `fd_logger.cxx`/`n3fjp_logger.cxx` は TCP ソケットベース。
+  `xmlrpc_log.cxx` は XML-RPC ベース)。
+
+  そこで本機能は、アマチュア無線ロギングエコシステムで WSJT-X が
+  導入し JTAlert・N1MM Logger+・GridTracker・Log4OM・HRD Logbook・
+  Winlog32 等の主要な外部ロガーが軒並み対応している
+  **「1 QSO を単体で完結したミニ ADIF ファイルとして UDP データグラムで
+  送信する」方式** (WSJT-X の "Logged ADIF" UDP メッセージ、
+  `NetworkMessage.hpp` type=12 で採用されている方式と同等) を新規に
+  採用した。これにより、外部ロガー側に特別な追加対応を要求せず、
+  既存の「WSJT-X/JTAlert 用 UDP 受信」設定をそのまま流用してこの
+  アプリからの QSO も受信できる。
+
+### 設計判断のポイント
+
+- **永続化フォーマットは JSON**: fldigi は独自の XML (実体は INI 相当)
+  形式で `$HOME/.fldigi/fldigi_def.xml` に保存するが、本移植版は
+  ユーザー要望により「各OSで標準的な構造化フォーマット」として
+  JSON を採用した。FPC 標準の `fpjson`/`jsonparser` ユニットのみで
+  実装でき、外部ライブラリへの依存を増やさない。
+- **保存場所は実行ファイルと同じディレクトリ**: fldigi は
+  `GetAppConfigDir` 相当の OS 標準設定ディレクトリを使うが、
+  ユーザー要望により `ParamStr(0)` (実行ファイルのパス) から
+  `ExtractFilePath` したディレクトリに `station_info.json`/
+  `qso_log.json` を保存する方式とした (可搬性重視、USBメモリ等に
+  アプリ本体ごとコピーして運用したい場合に有利)。
+- **UDP 実装は FPC 標準の `Sockets` ユニットのみを使用**: Synapse
+  (`blcksock`) 等の外部パッケージを追加導入せず、`fpSocket`/
+  `fpSendTo`/`fpBind`/`fpRecvFrom` という POSIX ライクな低レベル
+  API を直接使用した。`TInetSockAddr`(`sin_family`/`sin_port`/
+  `sin_addr`) は Windows (`win/sockets.pp`) でも Unix系
+  (`unix/sockets.pp`) でも同じ `socketsh.inc` を共有しており、
+  同一ソースコードのままクロスプラットフォームで動作する。
+- **既定の送信先は 127.0.0.1 (ユーザー合意による)**: WSJT-X/JTAlert等の
+  一般的な運用は同一PC内の複数アプリ間連携が主目的であるため、
+  ブロードキャスト (`255.255.255.255`) ではなくユニキャスト
+  `127.0.0.1` を既定値とした。
+- **ポート番号は 52099 (著名アプリと非衝突)**: IANA の
+  [Service Names and Port Numbers Registry](https://www.iana.org/assignments/service-names-port-numbers/)
+  で未登録であること、かつ主要な外部ロガーの既定ポート
+  (WSJT-X=2237, JTAlert=2333, N1MM Logger+=12060/12061,
+  fldigi 自身の XML-RPC=7362 等) のいずれとも重複しないことを
+  確認した上で、ダイナミック/プライベートポート範囲
+  (49152-65535) 内の `52099` を既定値として採用した。
+  外部ロガー側の設定に合わせて `TAdifUdpSender.TargetPort` を
+  変更することも可能。
+- **既定で無効 (`Enabled = False`)**: 外部ロガー連携は明示的に
+  有効化しないと UDP 送信されない設計とした (意図しないネットワーク
+  送信を防ぐため)。
+- **内蔵ロギングと外部UDP配信は独立した機能**: `TQsoLogbook.AddQso()`
+  は常に内蔵ログ (`qso_log.json`) へ記録し、`UdpSender` プロパティに
+  `TAdifUdpSender` インスタンス (`Enabled=True`) が設定されている
+  場合のみ追加で外部送信する。内蔵ログのみ/外部UDPのみ/両方、を
+  自由に組み合わせられる。
+
+### 7-1. 検証手順 (自己完結型ループバックテスト)
+
+実際の外部ロガーアプリや別ホストが無い環境でも検証できるよう、
+同一プロセス内で `127.0.0.1:52099` へ UDP ソケットを bind し、
+`TAdifUdpSender` が送信したデータグラムを自分自身で受信・パースする
+ことで実データの往復を確認する。
+
+```bash
+fpc -Sood -Mobjfpc -Fuunits -FUunits -FEtest -o test/test_station_adif test/test_station_adif.lpr
+./test/test_station_adif
+```
+
+このサンドボックス環境での実行結果 (抜粋):
+
+```
+=== 局情報記憶 (StationInfo) / ADIF-over-UDP送信 (AdifUdpSender) / 内蔵QSOロギング (QsoLogbook) 検証 ===
+
+--- 1. TStationInfo (局情報) の保存/再読込 往復確認 ---
+  [OK] SaveToFile でファイルが作成される
+  [OK] MyCall が往復する: JA1TEST
+  [OK] OperCall が往復する: JA1OPER
+  ...(中略)...
+
+--- 2. ADIF レコード組み立て内容の確認 (BuildAdifRecord) ---
+生成された ADIF レコード:
+<ADIF_VER:5>3.1.4<PROGRAMID:17>LazarusFldigiPort<PROGRAMVERSION:3>1.0<EOH>
+<CALL:4>W1AW<QSO_DATE:8>20260828<TIME_ON:6>123456<MODE:4>RTTY<FREQ:7>14.0745<RST_SENT:3>599<RST_RCVD:3>599<STATION_CALLSIGN:7>JA1TEST<OPERATOR:7>JA1TEST<MY_GRIDSQUARE:6>PM95TQ<MY_CITY:5>Tokyo<MY_ANTENNA:6>Dipole<EOR>
+
+--- 3. UDP ループバック送受信テスト (127.0.0.1:52099) ---
+  [OK] 受信用ソケットの作成に成功する
+  [OK] bind(127.0.0.1:52099) に成功する
+  [OK] SendQso が送信成功 (Result=True) を返す
+  [OK] 受信側で UDP データグラムを実際に受信した (n=234)
+  ...(中略)...
+
+--- 5. TQsoLogbook (本アプリ内蔵ロギング機能) の確認 ---
+  [OK] 生成直後は Count=0 である
+  [OK] AddQso 後に Count=1 になる
+  ...(中略)...
+
+--- 6. TQsoLogbook + AdifUdpSender 連携確認 (AddQso が自動でUDP送信をトリガーする) ---
+  [OK] AddQso 後、内蔵ログにも記録される
+  [OK] AddQso が内部で UDP 送信もトリガーし、受信できる
+  ...(中略)...
+
+=== テスト完了: 0 件の失敗 (全 52 件中) ===
+```
+
+この結果から、以下が実データで確認できた:
+
+- `TStationInfo` の局情報が JSON ファイルへ正しく保存・復元されること。
+- `TAdifUdpSender.BuildAdifRecord()` が fldigi 準拠の ADIF タグ名・
+  書式で正しくレコードを組み立てること。
+- 実際に `Sockets` ユニット経由で UDP データグラムが `127.0.0.1:52099`
+  へ送信され、受信側で正しくパースできること。
+- `Enabled=False` (既定値) の間は送信が行われないこと。
+- `TQsoLogbook` への QSO 追加が JSON ファイルへ正しく永続化され、
+  再読込後も内容が一致すること。
+- `TQsoLogbook.UdpSender` を設定すると、`AddQso()` 呼び出しだけで
+  内蔵ログへの記録と外部ロガーへの UDP 配信が両方自動的にトリガー
+  されること。
+
+### 局情報/ADIF-UDP/内蔵ロギング関連の既知の制約・省略した範囲
+
+- ADIF レコードで送信するフィールドは QSO の基本項目
+  (CALL/QSO_DATE/TIME_ON/TIME_OFF/MODE/FREQ/RST_SENT/RST_RCVD/NAME/
+  QTH/GRIDSQUARE/COMMENT + 自局情報) に限定している。POTA/SOTA
+  参照番号、コンテストナンバー等の拡張フィールドは
+  `TAdifQsoData`/`TQsoRecord` にフィールドを追加すれば拡張可能な
+  構造にしてある。
+- `TQsoLogbook` は全件をメモリ上の配列に保持するシンプルな実装
+  (fldigi の `cQsoDb` のような検索インデックス・重複チェック機能は
+  未実装)。大量のQSO記録を扱う場合は将来的な最適化対象。
+- UDP 送信は fire-and-forget (到達確認なし) であり、これは WSJT-X
+  方式・fldigi の `maclogger` 等、既存の全ての UDP 連携パターンでも
+  同様 (UDP の性質上、確実な配送を保証する場合は別途アプリケーション
+  層での確認応答が必要)。
+- GUI (LCL) からの局情報入力ダイアログ、QSOログ一覧表示、および
+  UDP送信の有効化トグルスイッチは、`units/` のコアロジックとしては
+  完成しているが、`forms/UnitMainForm.pas` への実際の組み込み
+  (入力フォームの追加) は今後の拡張タスクとする。
