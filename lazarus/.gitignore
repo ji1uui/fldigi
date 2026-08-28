@@ -12,6 +12,7 @@ test/test_station_adif
 test/test_contestlog
 test/test_fftfilt
 test/test_filter_switch
+test/test_opprofile
 forms/DemoModemApp
 *.res
 backup/

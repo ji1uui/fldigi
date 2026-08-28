@@ -34,7 +34,9 @@ lazarus/
 │   ├── QsoLogbook.pas            本アプリ内蔵QSOロギング (fldigi: cQsoDb)
 │   ├── AdifFile.pas              完全版ADIF入出力 (fldigi: cQsoRec/cQsoDb)
 │   ├── DxccDatabase.pas          cty.dat解析・DXCC/ゾーン判定 (fldigi: dxcc.cxx)
-│   └── ContestLog.pas            コンテストロギング (fldigi: contest.cxx/counties.cxx)
+│   ├── ContestLog.pas            コンテストロギング (fldigi: contest.cxx/counties.cxx)
+│   ├── OpProfile.pas             運用プロファイル (局/運用者/運用地/設備/形態の5軸)
+│   └── AppConfig.pas             PC固有設定(接続軸)・セッション状態
 ├── forms/                  -- LCL (GUI) を使った実装例
 │   ├── UnitMainForm.pas    TForm 継承のメインフォーム実装例
 │   ├── DemoModemApp.lpr    デモアプリのエントリポイント
@@ -47,7 +49,8 @@ lazarus/
     ├── test_portaudio.lpr    PortAudio バインディングの動作確認テスト
     ├── test_rigcontrol.lpr   Hamlib CAT制御の動作確認テスト (疑似CAT通信)
     ├── test_station_adif.lpr 局情報記憶/ADIF-UDP送信/内蔵ロギングの動作確認テスト
-    └── test_contestlog.lpr   コンテストロギング/DXCC・ゾーン判定の動作確認テスト
+    ├── test_contestlog.lpr   コンテストロギング/DXCC・ゾーン判定の動作確認テスト
+    └── test_opprofile.lpr    運用プロファイル/PC固有設定の動作確認テスト
 ```
 
 ## 1. モデムエンジン設計 (`TCustomModem` / `TModemEngine`)
@@ -1142,3 +1145,176 @@ fpc -Sood -Mobjfpc -Fuunits -FUunits -FEtest -o test/test_contestlog test/test_c
   ファイル選択ダイアログは、`units/` のコアロジックとしては完成して
   いるが、`forms/UnitMainForm.pas` への実際の組み込みは今後の拡張
   タスクとする。
+
+## 9. 運用プロファイル (`units/OpProfile.pas`) / PC固有設定・セッション状態
+   (`units/AppConfig.pas`)
+
+「どの局として・誰が・どこから・何の設備で・どういう目的で運用するか」を
+1クリックで切り替える機能。自宅運用と移動運用、個人局と社団局を行き来する
+たびにコールサイン・QTH・グリッドロケータ・空中線電力・アンテナを手作業で
+書き換える手間をなくす。
+
+### なぜ fldigi の設定構造を踏襲しないのか
+
+fldigi の設定は `progdefaults` という単一構造体に **878個** の項目
+(`src/include/configuration.h` の `ELEM_()` を実測) がフラットに並び、
+すべてが1個の `fldigi_def.xml` に保存される。**運用形態を切り替える概念が
+存在しない**ため、運用地や局を変えるたびに個別の設定項目を手で直すことに
+なる。本移植版の設定層はまだ `StationInfo.pas` (6項目) しか無い段階だった
+ので、878項目を真似るのではなく構造から作り直した。
+
+### ユースケースの MECE 分解
+
+運用時に変わりうるものを「何を答える情報か」で分類すると、互いに重複せず
+(Mutually Exclusive)、実運用のケースを網羅する (Collectively Exhaustive)
+**6つの軸**に分かれる。
+
+| 軸 | 答える問い | 対応するADIFフィールド |
+|---|---|---|
+| (1) 局 Station | 誰の免許で電波を出しているか | `STATION_CALLSIGN` / `OWNER_CALLSIGN` |
+| (2) 運用者 Operator | 実際に操作しているのは誰か | `OPERATOR` |
+| (3) 運用地 Site | どこから出ているか | `MY_GRIDSQUARE` / `MY_CITY` / `MY_SOTA_REF` … |
+| (4) 設備 Equipment | どのリグ・アンテナ・電力で出ているか | `MY_RIG` / `MY_ANTENNA` / `TX_PWR` |
+| (5) 接続 Interface | その設備が「このPC」のどこに繋がっているか | (ADIF外) |
+| (6) 形態 Context | 何のための運用か | `CONTEST_ID` 等 |
+
+代表的なユースケースがこの6軸でどう表現されるか:
+
+| ユースケース | 変わる軸 |
+|---|---|
+| 個人局と社団局を使い分ける | (1)局 |
+| 同一人が複数コールサインを持つ | (1)局 |
+| 記念局・特別局として運用する | (1)局 + (6)形態 |
+| 常置場所以外へ移動運用する | (3)運用地 (+ (1)局のポータブル指定) |
+| POTA/SOTA/IOTA として運用する | (3)運用地 + (6)形態 |
+| リグ/アンテナの組み合わせを変える | (4)設備 |
+| QRP運用に切り替える | (4)設備 |
+| **クラブ局を複数人が同時に運用する** | **(1)局は共通 / (2)運用者と(5)接続が個別** |
+| シャックPCと移動用ノートを使い分ける | (5)接続のみ |
+| 同じ設備を別PCへ繋ぎ替える | (5)接続のみ |
+| リモート運用する | (3)運用地(局の所在地) + (5)接続 |
+| コンテストに参加する | (6)形態 (+ ログ分割) |
+| 衛星通信を行う | (4)設備 + (6)形態 |
+
+**この分解の要は「クラブ局を複数人が同時に運用する」ケース**である。これは
+局 (`STATION_CALLSIGN`) が共通のまま運用者 (`OPERATOR`) だけが異なることを
+要求するので、局と運用者が独立した軸であることの証明になっている。ADIFが
+この2つを別フィールドとして定義しているのと同じ構造であり、本ユニットも
+それに従う。
+
+### fldigi との対応表
+
+| fldigi (C++) | Lazarus (Pascal) | 役割 |
+|---|---|---|
+| (概念自体が存在しない) | `TOperatingProfile` (OpProfile.pas) | 各軸から1つずつ選んだ組み合わせ |
+| `progdefaults.myCall` (MYCALL) | `TStationIdentity.Callsign` | 局のコールサイン |
+| `progdefaults.operCall` (OPERCALL) | `TOperatorInfo.Callsign` | 運用者のコールサイン |
+| `progdefaults.myQth` / `myLocator` | `TOperatingSite.City` / `GridSquare` | 運用地 |
+| `progdefaults.myAntenna` | `TEquipmentSet.Antenna` | アンテナ |
+| (該当なし) | `TEquipmentSet.Rig` / `PowerW` | リグ名・空中線電力 |
+| `progdefaults.HamRigDevice` / `HamRigBaudrate` | `TInterfaceSetup.RigDevice` / `RigBaudRate` | CATポート設定 |
+| `progdefaults.PTTdev` / `RTSptt` / `DTRptt` | `TInterfaceSetup.PttDevice` / `PttMethod` | PTT制御方式 |
+| (PC固有と可搬な設定を区別しない) | `TMachineConfig` (AppConfig.pas) | PCごとの設定セクション |
+| `progStatus` (status.cxx) | `TSessionState` (AppConfig.pas) | 前回終了時の状態 |
+| `TStationInfo` (StationInfo.pas) | `TResolvedStation` | 解決済みの実効値 |
+
+### 設計判断のポイント
+
+- **軸ごとのマスタ + 組み合わせとしてのプロファイル**: 各軸の実体を独立した
+  マスタとして登録し、`TOperatingProfile` は「各軸から1つずつ選んだ参照の
+  束」として持つ。こうすると `3コール × 4運用地 × 5設備 = 60通り` を個別に
+  作る組み合わせ爆発を避けられ、**リグを買い替えても設備マスタを1つ直すだけ
+  で全プロファイルに反映**される。テストでは「マスタ合計8件で2×2×2×2=16通り
+  を表現」できることを確認している。
+- **参照は Name (軸内で一意) で行う**: GUIDではなく人間が読める名前をキーに
+  する。`op_profiles.json` はユーザーが直接編集することを想定しているため。
+  改名時は `TProfileRegistry.Rename*` が参照側も追従して書き換える。
+- **軸の「掛け算」は解決時に一箇所で行う**: 移動運用時のコールサインは
+  「局のコールサイン」×「運用地のポータブル指定」で決まる
+  (`JA1ABC` + `/1` → `JA1ABC/1`)。実効空中線電力は「免許上限」(局軸) と
+  「設備の出力」(設備軸) の **min** になり、免許を超えたまま運用してしまう
+  事故を防ぐ。こうした軸をまたぐ計算は各マスタには持たせず、
+  `TProfileRegistry.Resolve()` が `TResolvedStation` を組み立てる際に行う。
+- **接続軸(5)だけは別ファイル + マシン識別子でセクション分け**: リグの
+  モデル名は「設備」の属性だが、`COM3` / `/dev/ttyUSB0` というポート名は
+  同じ設備でもPCごとに変わる。本アプリは実行ファイルと同じディレクトリに
+  設定を置く = **USBメモリごと持ち運ぶ**運用を想定しているため、PC固有設定を
+  別ファイルにするだけでは解決しない (そのファイルも一緒に移動してしまう)。
+  そこで `machine_config.json` の中を「マシン識別子 → そのマシンの設定」と
+  いう辞書構造にし、各PCが自分のセクションだけを読むようにした。
+- **既存ユニットとの接続**: `TResolvedStation.ToStationInfo` で既存の
+  `TStationInfo` へ書き出せるため、**`QsoLogbook` / `AdifUdpSender` は一切
+  変更せずに**プロファイル機能の恩恵を受けられる。
+- **コンテスト定義との連携点**: `TOperatingProfile.ContestName` は
+  `ContestLog.pas` の `TContestRegistry.FindByName` へ渡す想定で、
+  プロファイル選択だけでコンテスト定義まで切り替えられる。
+
+### 9-1. 検証手順
+
+```bash
+fpc -Sood -Mobjfpc -Fuunits -FUunits -FEtest -otest/test_opprofile test/test_opprofile.lpr
+./test/test_opprofile
+```
+
+テストは getter/setter の確認ではなく、上記「MECE分解」の表の各ユースケースが
+実際に表現できることを1ケースずつ実データで確かめる構成にしている。
+
+```
+--- 2. 複数コールサイン保有 / クラブ局の同時運用 ---
+  [OK] クラブ局の 2 プロファイルは STATION_CALLSIGN が同一
+  [OK] 運用者A の OPERATOR = JA1ABC
+  [OK] 運用者B の OPERATOR = JA1DEF (同一局・同一時刻でも区別できる)
+
+--- 3. 移動運用: 局コールサイン x 運用地のポータブル指定 ---
+  [OK] 移動地では JA1ABC + "/1" = JA1ABC/1 に解決される
+
+--- 4. 設備の組み合わせ / 免許上限による空中線電力の丸め ---
+  [OK] 設備100W x 免許上限50W → 実効50W に丸められる
+  [OK] 同じ固定機でもクラブ局(免許200W)では100Wのまま
+
+--- 5. 設備マスタの修正が参照する全プロファイルへ反映される ---
+  [OK] 改名がプロファイル側の参照へ追従する
+
+--- 9. AppConfig: マシン識別子によるセクション分離 ---
+  [OK] 同じファイルでも mobile-note では COM3 が解決される
+    → USBメモリで PC を渡り歩いてもポート設定が壊れない
+
+=== テスト完了: 0 件の失敗 (全 77 件中) ===
+```
+
+### 9-2. 併せて修正した既存の潜在バグ (日本語がJSON往復で壊れる)
+
+本機能の実装中に、**既存の `StationInfo.pas` / `QsoLogbook.pas` が日本語を
+含む値を保存・再読込すると破壊する**バグを発見し、併せて修正した。
+
+FPC の `string` は `AnsiString(CP_ACP)` であり、Unix では `CP_ACP` の実体
+(`DefaultSystemCodePage`) が既定で 0 のままになる。この状態で fpjson が内部の
+`UnicodeString` から `AnsiString` へ変換すると、非ASCII文字がすべて `'?'` に
+潰れる。**書き出しは正しいUTF-8になるため、保存したファイルを読み直した
+瞬間にだけ壊れる**という分かりにくい壊れ方をする。
+
+```
+修正前: MyQth := '東京都八王子市' → 保存 → 再読込 → '???????'
+修正後: MyQth := '東京都八王子市' → 保存 → 再読込 → '東京都八王子市'
+```
+
+既存テストが ASCII 値 (`'Tokyo'` / `'JA1TEST'`) のみを使っていたため露見して
+いなかった。JSON永続化を行う4ユニット (`StationInfo` / `QsoLogbook` /
+`OpProfile` / `AppConfig`) の `initialization` で
+`SetMultiByteConversionCodePage(CP_UTF8)` を宣言して修正し、
+`test/test_station_adif.lpr` に日本語の往復テストを追加して再発を防いでいる。
+ロケール環境変数に依存しないので `LANG` が未設定の環境でも安全。
+
+### 運用プロファイル関連の既知の制約・省略した範囲
+
+- GUI (LCL) からのプロファイル選択UI・軸マスタの編集ダイアログは、
+  `units/` のコアロジックとしては完成しているが、
+  `forms/UnitMainForm.pas` への組み込みは今後の拡張タスクとする。
+- プロファイル選択時に実際に `THamlibRigControl` を開き直す・サウンド
+  デバイスを切り替える、という**適用処理そのものは未実装** (本ユニットは
+  「何を使うべきか」を解決するところまでを担当する)。推奨着手順の
+  `BandPlan.pas` と合わせて配線する想定。
+- `TEquipmentSet.Rig` / `PowerW` (ADIF: `MY_RIG` / `TX_PWR`) は
+  `TResolvedStation` までは解決されるが、`AdifUdpSender` はまだ
+  これらのタグを出力しない (`TStationInfo` に対応する項目が無いため)。
+  ADIF出力への反映は `AdifFile.pas` 経由のロギングと合わせて行う。

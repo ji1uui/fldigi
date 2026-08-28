@@ -200,4 +200,23 @@ begin
   SaveToFile(DefaultFilePath);
 end;
 
+initialization
+  { --- 日本語を含む設定値を JSON 往復で壊さないための必須設定 ---
+    FPC の `string` は AnsiString(CP_ACP) であり、Unix では CP_ACP の実体
+    (DefaultSystemCodePage) が既定で 0 のままになる。この状態で fpjson が
+    内部の UnicodeString から AnsiString へ変換すると、非 ASCII 文字が
+    すべて '?' に潰れる。書き出しは正しい UTF-8 になるため、保存した
+    ファイルを読み直した瞬間にだけ壊れるという分かりにくい壊れ方をする
+    (MyQth := '東京都八王子市' が再読込で '???????' になる)。
+
+    SetMultiByteConversionCodePage(CP_UTF8) で CP_ACP の実体を UTF-8 に
+    固定すると変換が無損失になり、往復が保証される。ロケール環境変数に
+    依存しないので LANG が未設定の環境でも安全。
+
+    プロセス全体に効くグローバル設定だが冪等なので、JSON 永続化を行う
+    各ユニット (本ユニット / QsoLogbook.pas / OpProfile.pas /
+    AppConfig.pas) がそれぞれ宣言し、リンク順に依存せず単体でも
+    正しく動くようにしている。 }
+  SetMultiByteConversionCodePage(CP_UTF8);
+
 end.

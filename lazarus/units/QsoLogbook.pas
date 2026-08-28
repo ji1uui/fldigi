@@ -364,4 +364,11 @@ begin
   SetLength(FRecords, 0);
 end;
 
+initialization
+  { 日本語 (相手局の名前・QTH 等) を JSON 往復で壊さないための必須設定。
+    理由と詳細は StationInfo.pas の initialization のコメントを参照。
+    プロセス全体に効く冪等な設定であり、JSON 永続化を行う各ユニットが
+    リンク順に依存せず単体で正しく動くよう、ここでも宣言している。 }
+  SetMultiByteConversionCodePage(CP_UTF8);
+
 end.
