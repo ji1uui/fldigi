@@ -58,6 +58,12 @@ type
   { fldigi: put_rx_char() 相当。受信復調された1文字を上位へ渡す }
   TPutRxCharEvent = procedure(Sender: TCustomModem; ACh: Integer) of object;
 
+  { fldigi: put_echo_char() 相当。"今まさに送信中の文字" を Tx パネルへ
+    エコー表示するためのコールバック。put_rx_char (受信パネル表示) とは
+    独立したチャネルであるため、専用のイベントとして分離する。
+    RTTY/CW の送信ルーチン (send_char/send_ch) から呼ばれる。 }
+  TEchoCharEvent = procedure(Sender: TCustomModem; ACh: Integer) of object;
+
   { モデムの状態変化・メトリクス更新等を GUI 層へ通知するためのイベント群。
     fldigi では REQ(put_freq,...) / REQ(callback_set_metric,...) など
     qrunner 経由でメインスレッドに配送される処理に相当する。
@@ -97,6 +103,7 @@ type
 
     FOnGetTxChar: TGetTxCharEvent;
     FOnPutRxChar: TPutRxCharEvent;
+    FOnEchoChar: TEchoCharEvent;
     FOnFrequencyChanged: TFrequencyEvent;
     FOnMetricChanged: TMetricEvent;
     FOnStatusText: TStatusTextEvent;
@@ -113,12 +120,21 @@ type
       fldigi: put_rx_char(c) 呼び出しに相当。 }
     procedure EmitRxChar(ACh: Integer);
 
+    { 派生クラスから「送信中」の文字を上位(Txパネル)へエコー表示する
+      ためのヘルパ。fldigi: put_echo_char(c) 呼び出しに相当。 }
+    procedure EmitEchoChar(ACh: Integer);
+
     { 派生クラスが送信すべき次の文字を取得するためのヘルパ。
       fldigi: get_tx_char() 呼び出しに相当。 }
     function FetchTxChar: Integer;
 
     { ステータス文字列を GUI へ伝える。fldigi: put_Status1/2, put_MODEstatus }
     procedure EmitStatus(const AText: string);
+
+    { CW モデム (CwModemImpl.pas) が適応速度追跡の結果を
+      GUI 表示用の CwRcvWPM プロパティへ反映するためのヘルパ。
+      fldigi: put_cwRcvWPM(cw_receive_speed) 相当。 }
+    procedure UpdateCwRcvWPM(AValue: Double);
 
     property Sound: TCustomSoundDevice read FSound;
   public
@@ -207,6 +223,7 @@ type
       -------------------------------------------------------------------- }
     property OnGetTxChar: TGetTxCharEvent read FOnGetTxChar write FOnGetTxChar;
     property OnPutRxChar: TPutRxCharEvent read FOnPutRxChar write FOnPutRxChar;
+    property OnEchoChar: TEchoCharEvent read FOnEchoChar write FOnEchoChar;
     property OnFrequencyChanged: TFrequencyEvent read FOnFrequencyChanged write FOnFrequencyChanged;
     property OnMetricChanged: TMetricEvent read FOnMetricChanged write FOnMetricChanged;
     property OnStatusText: TStatusTextEvent read FOnStatusText write FOnStatusText;
@@ -336,6 +353,12 @@ begin
     FOnPutRxChar(Self, ACh);
 end;
 
+procedure TCustomModem.EmitEchoChar(ACh: Integer);
+begin
+  if Assigned(FOnEchoChar) then
+    FOnEchoChar(Self, ACh);
+end;
+
 function TCustomModem.FetchTxChar: Integer;
 begin
   if Assigned(FOnGetTxChar) then
@@ -348,6 +371,11 @@ procedure TCustomModem.EmitStatus(const AText: string);
 begin
   if Assigned(FOnStatusText) then
     FOnStatusText(Self, AText);
+end;
+
+procedure TCustomModem.UpdateCwRcvWPM(AValue: Double);
+begin
+  FCwRcvWPM := AValue;
 end;
 
 function TCustomModem.TxProcess: Integer;
