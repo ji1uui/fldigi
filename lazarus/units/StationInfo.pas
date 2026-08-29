@@ -58,6 +58,11 @@ type
     FMyQth: string;       // 運用地 (QTH)        (fldigi: myQth     / ADIF: MY_CITY)
     FMyLocator: string;   // グリッドロケータ    (fldigi: myLocator / ADIF: MY_GRIDSQUARE)
     FMyAntenna: string;   // アンテナ情報        (fldigi: myAntenna / ADIF: MY_ANTENNA)
+    { OpProfile の TEquipmentSet が解決するのに、ここに受け皿が無かったため
+      TResolvedStation から先へ渡せていなかった項目 (README 9章の既知の制約)。
+      マクロの <MYRIG>/<MYPWR> と ADIF の MY_RIG/TX_PWR の双方で必要になる。 }
+    FMyRig: string;       // リグ                (ADIF: MY_RIG)
+    FMyPowerW: Integer;   // 送信出力[W] 0=未設定 (ADIF: TX_PWR)
   public
     constructor Create;
 
@@ -86,6 +91,8 @@ type
     property MyQth: string read FMyQth write FMyQth;
     property MyLocator: string read FMyLocator write FMyLocator;
     property MyAntenna: string read FMyAntenna write FMyAntenna;
+    property MyRig: string read FMyRig write FMyRig;
+    property MyPowerW: Integer read FMyPowerW write FMyPowerW;
   end;
 
   EStationInfoError = class(Exception);
@@ -101,6 +108,8 @@ const
   KEY_MY_QTH     = 'myQth';
   KEY_MY_LOCATOR = 'myLocator';
   KEY_MY_ANTENNA = 'myAntenna';
+  KEY_MY_RIG     = 'myRig';
+  KEY_MY_POWER_W = 'myPowerW';
 
   DEFAULT_FILE_NAME = 'station_info.json';
 
@@ -115,6 +124,8 @@ begin
   FMyQth := '';
   FMyLocator := '';
   FMyAntenna := '';
+  FMyRig := '';
+  FMyPowerW := 0;
 end;
 
 class function TStationInfo.DefaultFilePath: string;
@@ -156,6 +167,10 @@ begin
       FMyQth     := obj.Get(KEY_MY_QTH, '');
       FMyLocator := obj.Get(KEY_MY_LOCATOR, '');
       FMyAntenna := obj.Get(KEY_MY_ANTENNA, '');
+      { 旧いファイルにはこの2項目が無いので、既定値で補う
+        (キーが無いだけで読み込み全体を失敗させない)。 }
+      FMyRig := obj.Get(KEY_MY_RIG, '');
+      FMyPowerW := obj.Get(KEY_MY_POWER_W, 0);
     finally
       data.Free;
     end;
@@ -176,6 +191,8 @@ begin
     obj.Add(KEY_MY_QTH, FMyQth);
     obj.Add(KEY_MY_LOCATOR, FMyLocator);
     obj.Add(KEY_MY_ANTENNA, FMyAntenna);
+    obj.Add(KEY_MY_RIG, FMyRig);
+    obj.Add(KEY_MY_POWER_W, FMyPowerW);
 
     { 一時ファイル + rename による原子的保存 (SafeFileIO 参照)。
       書き込み途中で電源が落ちても局情報が消えない。 }

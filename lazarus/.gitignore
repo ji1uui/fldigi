@@ -23,3 +23,5 @@ forms/DemoModemApp
 *.json.tmp
 *.adi.tmp
 backup/
+# ビルドログ
+*.log

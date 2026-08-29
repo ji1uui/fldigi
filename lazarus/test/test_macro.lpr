@@ -19,7 +19,7 @@ program test_macro;
 
 uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
-  Classes, SysUtils, DateUtils, MacroEngine;
+  Classes, SysUtils, DateUtils, MacroEngine, StationInfo;
 
 var
   FailCount: Integer = 0;
@@ -532,26 +532,42 @@ begin
 end;
 
 type
-  { 宿主のテスト実装。実機の代わりに「何がどの順で起きたか」を記録する。 }
+  { 宿主のテスト実装。実機の代わりに「何がどの順で起きたか」を記録する。
+
+    送信は非同期なので、送信終了の折り返し (NotifyTxFinished) を
+    自動で返すか、テストが手で返すかを選べるようにしてある。
+    手で返せることが重要 — 「送信中にログが走っていないか」は
+    折り返しを保留したまま確かめないと検証にならない。 }
   TRecordingHost = class(TMacroHost)
   private
     FLog: TStringList;
     FLogOk: Boolean;
+    FAutoFinishTx: Boolean;
+    FAutoFireTimer: Boolean;
+    FTxPending: Boolean;
+    FTimerPending: Boolean;
   public
     constructor Create;
     destructor Destroy; override;
     procedure SendText(const AText: string); override;
     procedure StartTransmit; override;
-    procedure StopTransmit; override;
+    procedure RequestReceive; override;
     procedure AbortTransmit; override;
     function LogCurrentQso: Boolean; override;
     procedure ClearRxWindow; override;
     procedure ClearTxWindow; override;
     procedure SetMode(const AMode: string); override;
     procedure SetFreqMHz(AFreqMHz: Double); override;
-    procedure Wait(ASeconds: Double); override;
-    { ログ記録が成功したことにするか (失敗時の挙動を試すため) }
+    procedure StartTimer(ASeconds: Double); override;
+
+    { 保留していた送信終了を折り返す (実機で送信が終わった相当)。 }
+    procedure FinishTx;
+    procedure FireTimer;
+
     property LogOk: Boolean read FLogOk write FLogOk;
+    property AutoFinishTx: Boolean read FAutoFinishTx write FAutoFinishTx;
+    property AutoFireTimer: Boolean read FAutoFireTimer write FAutoFireTimer;
+    property TxPending: Boolean read FTxPending;
     property Log: TStringList read FLog;
   end;
 
@@ -560,6 +576,8 @@ begin
   inherited Create;
   FLog := TStringList.Create;
   FLogOk := True;
+  FAutoFinishTx := True;
+  FAutoFireTimer := True;
 end;
 
 destructor TRecordingHost.Destroy;
@@ -578,13 +596,26 @@ begin
   FLog.Add('TX');
 end;
 
-procedure TRecordingHost.StopTransmit;
+procedure TRecordingHost.RequestReceive;
 begin
-  FLog.Add('RX');
+  FLog.Add('RX-REQ');
+  FTxPending := True;
+  if FAutoFinishTx then
+    FinishTx;
+end;
+
+procedure TRecordingHost.FinishTx;
+begin
+  if not FTxPending then Exit;
+  FTxPending := False;
+  FLog.Add('TX-END');
+  if Assigned(Runner) then
+    Runner.NotifyTxFinished;
 end;
 
 procedure TRecordingHost.AbortTransmit;
 begin
+  FTxPending := False;
   FLog.Add('ABORT');
 end;
 
@@ -617,115 +648,428 @@ begin
   FLog.Add('FREQ:' + FormatFloat('0.000', AFreqMHz));
 end;
 
-procedure TRecordingHost.Wait(ASeconds: Double);
+procedure TRecordingHost.StartTimer(ASeconds: Double);
 begin
-  FLog.Add('WAIT:' + FormatFloat('0.0', ASeconds));
+  FLog.Add('TIMER:' + FormatFloat('0.0', ASeconds));
+  FTimerPending := True;
+  if FAutoFireTimer then
+    FireTimer;
 end;
 
-procedure TestRunner;
+procedure TRecordingHost.FireTimer;
+begin
+  if not FTimerPending then Exit;
+  FTimerPending := False;
+  if Assigned(Runner) then
+    Runner.NotifyTimerElapsed;
+end;
+
+{ --------------------------------------------------------------------- }
+
+procedure TestPhaseTracking;
+{ 局面は「値を入れる」という自然な操作で自動的に進む必要がある。
+  別作業にすると必ず忘れられる (実際、以前の設計では
+  ClearWorkedStation を実装しながらどこからも呼んでいなかった)。 }
 var
   ctx: TMacroContext;
+begin
+  WriteLn;
+  WriteLn('--- 10. 局面の自動追跡 ---');
+  ctx := TMacroContext.Create;
+  try
+    Check(ctx.Phase = qpIdle, '初期状態は相手なし');
+    Check(ctx.Role = qrRun, '既定の立場は CQ を出す側');
+
+    ctx.Call := 'JA1ZZZ';
+    Check(ctx.Phase = qpAnswered,
+      '相手のコールを入れると「コール取得」へ進む。実際: ' +
+      QsoPhaseDescription(ctx.Phase));
+
+    ctx.Phase := qpExchangeSent;
+    ctx.RstRcvd := '599';
+    Check(ctx.Phase = qpExchangeRcvd,
+      '相手のレポートを入れると「受領済み」へ進む');
+
+    { 打ち直しても局面は後戻りしない }
+    ctx.Call := 'JA1ZZ';
+    Check(ctx.Phase = qpExchangeRcvd,
+      'コールを打ち直しても局面は戻らない');
+
+    { 受信ナンバー・交換ナンバーでも進む }
+    ctx.ClearWorkedStation;
+    Check(ctx.Phase = qpIdle, 'ClearWorkedStation で相手なしへ戻る');
+    ctx.SerialIn := '045';
+    Check(ctx.Phase = qpExchangeRcvd, '受信ナンバーでも受領済みへ進む');
+
+    ctx.ClearWorkedStation;
+    ctx.ExchangeIn := '10M';
+    Check(ctx.Phase = qpExchangeRcvd, '交換ナンバーでも受領済みへ進む');
+
+    { 空文字を入れても進まない }
+    ctx.ClearWorkedStation;
+    ctx.Call := '';
+    Check(ctx.Phase = qpIdle, '空文字では局面は進まない');
+  finally
+    ctx.Free;
+  end;
+end;
+
+procedure TestSequenceSelection;
+{ 立場 × 局面で「次に押すべきマクロ」が一意に決まること (ESM の土台)。 }
+var
+  ms: TMacroSet;
+  d: TMacroDefinition;
+begin
+  WriteLn;
+  WriteLn('--- 11. 局面からマクロを選ぶ (ESM) ---');
+  ms := TMacroSet.Create;
+  try
+    ms.RegisterBuiltins;
+
+    d := ms.FindForSequence(qrRun, qpIdle);
+    Check(d <> nil, 'Run/相手なし → マクロが決まる');
+    if d <> nil then CheckEq(d.Name, 'CQ', 'Run/相手なし は CQ');
+
+    d := ms.FindForSequence(qrRun, qpAnswered);
+    if d <> nil then CheckEq(d.Name, 'レポート', 'Run/コール取得 はレポート');
+
+    d := ms.FindForSequence(qrRun, qpExchangeRcvd);
+    if d <> nil then CheckEq(d.Name, '73', 'Run/受領済み は 73 (ログ付き)');
+
+    d := ms.FindForSequence(qrSearchPounce, qpIdle);
+    Check(d <> nil, 'S&P/相手なし → マクロが決まる');
+    if d <> nil then CheckEq(d.Name, '呼ぶ', 'S&P/相手なし は「呼ぶ」');
+
+    d := ms.FindForSequence(qrSearchPounce, qpAnswered);
+    if d <> nil then CheckEq(d.Name, '応答レポート',
+      'S&P/コール取得 は応答レポート');
+
+    { 同じ局面でも立場が違えば別のマクロが返る — これが要点 }
+    Check(ms.FindForSequence(qrRun, qpIdle) <>
+          ms.FindForSequence(qrSearchPounce, qpIdle),
+      '同じ局面でも立場が違えば別のマクロになる');
+
+    { 順序を宣言していないマクロは選ばれない }
+    d := ms.Find('AGN?');
+    Check(d <> nil, '補助マクロは存在する');
+    if d <> nil then
+      Check(not d.MatchesSequence(qrRun, qpIdle),
+        '順序を宣言していないマクロは自動選択の対象外');
+  finally
+    ms.Free;
+  end;
+end;
+
+procedure TestAsyncSequence;
+{ 設計変更の本丸。<RX> の後ろに置いた <LOG> が、送信を送り切ってから
+  実行されること。同期実装では送信をキューに積んだ直後にログしていた。 }
+var
+  ctx: TMacroContext;
+  ms: TMacroSet;
   ex: TMacroExpander;
   host: TRecordingHost;
   runner: TMacroRunner;
-  r: TMacroExpansion;
   rr: TMacroRunResult;
 begin
   WriteLn;
-  WriteLn('--- 10. マクロの実行 (TMacroRunner) ---');
+  WriteLn('--- 12. 送信完了を待ってからログすること ---');
   ctx := MakeContext;
-  ex := TMacroExpander.Create;
+  ms := TMacroSet.Create;
+  ex := TMacroExpander.Create(ms);
   host := TRecordingHost.Create;
-  runner := TMacroRunner.Create(host);
+  runner := TMacroRunner.Create(host, ex);
   try
-    { 展開順どおりに宿主へ流れるか }
-    r := ex.Prepare('<TX>CQ de <MYCALL> k<RX>', ctx);
-    rr := runner.Run(r, ctx);
-    Check(rr.Executed, '検査を通ったマクロは実行される');
-    CheckEq(host.Log.CommaText, 'TX,"TEXT:CQ de JI1UUI k",RX',
-      '操作と本文が展開順に宿主へ届く');
+    ms.RegisterBuiltins;
+    host.AutoFinishTx := False;   { 送信終了を手で返す }
 
-    { エラーのあるマクロは実行を拒否する。
-      検査しても止めなければ意味がないので、ここが本番。 }
-    host.Log.Clear;
-    r := ex.Prepare('<TX>CQ de <MYCALL> k', ctx);   // <RX> が無い
-    rr := runner.Run(r, ctx);
-    Check(not rr.Executed, 'エラーのあるマクロは実行されない');
-    Check(host.Log.Count = 0, '拒否時は宿主が一切呼ばれない');
-    Check(Pos('電波を出し続けます', rr.RefusalReason) > 0,
-      '拒否理由が伝わる');
+    ctx.Role := qrRun;
+    ctx.Phase := qpExchangeRcvd;
+    rr := runner.ExecuteNamed('TU', ctx);
+    Check(rr.Started, 'マクロが起動する');
+    Check(not rr.Completed, '送信終了待ちで止まっている');
+    Check(runner.State = mrsWaitingTxEnd, '状態は送信終了待ち');
+    Check(runner.Busy, '実行中と判定される');
+    Check(host.Log.IndexOf('LOG-OK') < 0,
+      '送信が終わるまでログは実行されない (ここが同期実装との違い)');
 
-    { 強行指定 }
-    host.Log.Clear;
-    rr := runner.Run(r, ctx, True);
-    Check(rr.Executed, 'AForce=True なら強行できる');
-    Check(host.Log.Count > 0, '強行時は宿主が呼ばれる');
+    { 実行中に別のマクロを起動できないこと }
+    rr := runner.ExecuteNamed('CQコンテスト', ctx);
+    Check(not rr.Started, '実行中は別のマクロを受け付けない');
+    Check(Pos('実行中', rr.RefusalReason) > 0, '拒否理由が分かる');
 
-    { 送信ナンバーはログ成功時にだけ進む }
-    host.Log.Clear;
-    ctx.ResetSerial(1);
-    host.LogOk := True;
-    r := ex.Prepare('<TX>TU<LOG><RX>', ctx);
-    rr := runner.Run(r, ctx);
-    Check(rr.Logged, 'ログ記録が行われた');
-    Check(ctx.SerialOut = 2, 'ログ成功で送信ナンバーが 2 に進む。実際: ' +
-      IntToStr(ctx.SerialOut));
-
-    host.Log.Clear;
-    ctx.ResetSerial(1);
-    host.LogOk := False;
-    rr := runner.Run(r, ctx);
-    Check(not rr.Logged, 'ログ記録が失敗した');
-    Check(ctx.SerialOut = 1,
-      'ログ失敗なら送信ナンバーは進まない (番号を飛ばさない)。実際: ' +
-      IntToStr(ctx.SerialOut));
-    host.LogOk := True;
-
-    { <INCR>/<DECR> }
-    ctx.ResetSerial(5);
-    r := ex.Prepare('<INCR>', ctx);
-    runner.Run(r, ctx);
-    Check(ctx.SerialOut = 6, '<INCR> で 1 増える');
-    r := ex.Prepare('<DECR>', ctx);
-    runner.Run(r, ctx);
-    Check(ctx.SerialOut = 5, '<DECR> で 1 減る');
-    ctx.ResetSerial(1);
-    runner.Run(r, ctx);
-    Check(ctx.SerialOut = 1, '<DECR> は 1 未満にはしない。実際: ' +
-      IntToStr(ctx.SerialOut));
-
-    { 引数つき操作が宿主へ正しく渡るか }
-    host.Log.Clear;
-    r := ex.Prepare('<MODE:CW><FREQ:7.026><WAIT:1.5>', ctx);
-    runner.Run(r, ctx);
-    CheckEq(host.Log.CommaText, 'MODE:CW,FREQ:7.026,WAIT:1.5',
-      '引数つき操作が値ごと宿主へ渡る');
-
-    { 警告で止める設定 }
-    host.Log.Clear;
-    ctx.Name := '';
-    r := ex.Prepare('<TX>tnx <NAME><RX>', ctx);
-    Check(r.HasWarnings, '前提: 名前が空なので警告が出る');
-    runner.AllowWithWarnings := False;
-    rr := runner.Run(r, ctx);
-    Check(not rr.Executed, 'AllowWithWarnings=False なら警告でも実行しない');
-    runner.AllowWithWarnings := True;
-    rr := runner.Run(r, ctx);
-    Check(rr.Executed, '既定では警告があっても実行する');
-
-    { 宿主未設定 }
-    runner.Host := nil;
-    try
-      runner.Run(r, ctx);
-      Check(False, '宿主が nil なら例外');
-    except
-      on E: EMacroError do
-        Check(True, '宿主が nil なら EMacroError');
-    end;
+    { 送信完了を折り返す }
+    host.FinishTx;
+    Check(runner.State = mrsDone, '折り返しで最後まで進む');
+    Check(host.Log.IndexOf('LOG-OK') >= 0, '送信完了後にログが実行される');
+    Check(host.Log.IndexOf('TX-END') < host.Log.IndexOf('LOG-OK'),
+      'ログは必ず送信完了より後');
+    Check(not runner.Busy, '完了後は実行中ではない');
   finally
     runner.Free;
     host.Free;
     ex.Free;
+    ms.Free;
+    ctx.Free;
+  end;
+end;
+
+procedure TestPostLogTransition;
+{ ログに成功したら、相手局情報を消して局面を戻すところまでが 1 つの操作。
+  以前はここが抜けており、次の交信で前の局のコールを送っていた。 }
+var
+  ctx: TMacroContext;
+  ms: TMacroSet;
+  ex: TMacroExpander;
+  host: TRecordingHost;
+  runner: TMacroRunner;
+  rr: TMacroRunResult;
+begin
+  WriteLn;
+  WriteLn('--- 13. ログ後の遷移 ---');
+  ctx := MakeContext;
+  ms := TMacroSet.Create;
+  ex := TMacroExpander.Create(ms);
+  host := TRecordingHost.Create;
+  runner := TMacroRunner.Create(host, ex);
+  try
+    ms.RegisterBuiltins;
+    ctx.Role := qrRun;
+    ctx.ResetSerial(7);
+    ctx.Call := 'JA1ZZZ';
+    ctx.RstRcvd := '599';     { → qpExchangeRcvd }
+
+    rr := runner.ExecuteNamed('TU', ctx);
+    Check(rr.Completed, 'TU が最後まで走る');
+    Check(runner.Logged, 'ログに記録された');
+    Check(ctx.SerialOut = 8, '送信ナンバーが進む。実際: ' +
+      IntToStr(ctx.SerialOut));
+    CheckEq(ctx.Call, '', 'ログ後に相手のコールが消える');
+    CheckEq(ctx.RstRcvd, '', 'ログ後に受信 RST が消える');
+    Check(ctx.Phase = qpIdle,
+      'ログ後は「相手なし」へ戻る (次の CQ が正しい局面から始まる)。実際: ' +
+      QsoPhaseDescription(ctx.Phase));
+    CheckEq(ctx.MyCall, 'JI1UUI', '自局は残る');
+
+    { ログに失敗したら何も進めない }
+    ctx.ResetSerial(7);
+    ctx.Call := 'JA1YYY';
+    ctx.RstRcvd := '579';
+    host.LogOk := False;
+    rr := runner.ExecuteNamed('TU', ctx);
+    Check(not runner.Logged, 'ログに失敗した');
+    Check(ctx.SerialOut = 7, 'ログ失敗なら送信ナンバーは進まない');
+    CheckEq(ctx.Call, 'JA1YYY', 'ログ失敗なら相手局情報も消さない');
+    host.LogOk := True;
+  finally
+    runner.Free;
+    host.Free;
+    ex.Free;
+    ms.Free;
+    ctx.Free;
+  end;
+end;
+
+procedure TestFullQsoSequence;
+{ Run 側の 1 交信を頭から通す。ESM (局面から自動選択) だけで
+  最後まで進めることを確かめる。 }
+var
+  ctx: TMacroContext;
+  ms: TMacroSet;
+  ex: TMacroExpander;
+  host: TRecordingHost;
+  runner: TMacroRunner;
+  rr: TMacroRunResult;
+begin
+  WriteLn;
+  WriteLn('--- 14. コンテスト 1 交信を局面駆動で通す ---');
+  ctx := MakeContext;
+  ctx.Call := '';
+  ctx.RstRcvd := '';
+  ctx.Phase := qpIdle;
+  ms := TMacroSet.Create;
+  ex := TMacroExpander.Create(ms);
+  host := TRecordingHost.Create;
+  runner := TMacroRunner.Create(host, ex);
+  try
+    { コンテスト用だけを登録する (ラバースタンプと競合させない) }
+    ms.AddOrReplace('CQ TEST', '<TX>CQ TEST de <MYCALL> TEST<RX>', mcContest)
+      .DeclareSequence(mrfRun, [qpIdle], qpCalling);
+    ms.AddOrReplace('EXCH', '<TX><CALL> <RST><#><RX>', mcContest)
+      .DeclareSequence(mrfRun, [qpAnswered], qpExchangeSent);
+    ms.AddOrReplace('TU!', '<TX>TU <MYCALL> TEST<RX><LOG>', mcContest)
+      .DeclareSequence(mrfRun, [qpExchangeRcvd, qpConfirmed], qpConfirmed);
+
+    ctx.Role := qrRun;
+    ctx.ResetSerial(1);
+
+    { (1) CQ }
+    rr := runner.ExecuteForSequence(ctx);
+    Check(rr.Started, '(1) 局面から CQ が選ばれて実行される');
+    Check(ctx.Phase = qpCalling, '(1) 局面が「呼びかけ中」へ');
+
+    { (2) 相手のコールを取得 (オペレータが打ち込む相当) }
+    ctx.Call := 'JA1ZZZ';
+    Check(ctx.Phase = qpAnswered, '(2) 局面が「コール取得」へ自動で進む');
+
+    { (3) 交換を送る }
+    host.Log.Clear;
+    rr := runner.ExecuteForSequence(ctx);
+    Check(rr.Started, '(3) 局面から交換マクロが選ばれる');
+    CheckEq(host.Log[1], 'TEXT:JA1ZZZ 599001',
+      '(3) 相手のコールと送信ナンバーが乗る');
+    Check(ctx.Phase = qpExchangeSent, '(3) 局面が「送出済み」へ');
+
+    { (4) 相手の交換を受領 }
+    ctx.SerialIn := '032';
+    Check(ctx.Phase = qpExchangeRcvd, '(4) 局面が「受領済み」へ自動で進む');
+
+    { (5) TU + ログ }
+    host.Log.Clear;
+    rr := runner.ExecuteForSequence(ctx);
+    Check(rr.Started, '(5) 局面から TU が選ばれる');
+    Check(runner.Logged, '(5) ログに記録された');
+    Check(ctx.SerialOut = 2, '(5) 送信ナンバーが 2 へ。実際: ' +
+      IntToStr(ctx.SerialOut));
+    Check(ctx.Phase = qpIdle, '(5) 局面が「相手なし」へ戻る');
+    CheckEq(ctx.Call, '', '(5) 相手のコールが消えている');
+
+    { (6) 次の CQ が、前の局のコールを含まないこと }
+    host.Log.Clear;
+    rr := runner.ExecuteForSequence(ctx);
+    Check(rr.Started, '(6) 次の CQ が選ばれる');
+    Check(Pos('JA1ZZZ', host.Log.Text) = 0,
+      '(6) 次の CQ に前の局のコールが混ざらない');
+  finally
+    runner.Free;
+    host.Free;
+    ex.Free;
+    ms.Free;
+    ctx.Free;
+  end;
+end;
+
+procedure TestRunnerGuards;
+var
+  ctx: TMacroContext;
+  ms: TMacroSet;
+  ex: TMacroExpander;
+  host: TRecordingHost;
+  runner: TMacroRunner;
+  rr: TMacroRunResult;
+begin
+  WriteLn;
+  WriteLn('--- 15. 実行時の防御 ---');
+  ctx := MakeContext;
+  ms := TMacroSet.Create;
+  ex := TMacroExpander.Create(ms);
+  host := TRecordingHost.Create;
+  runner := TMacroRunner.Create(host, ex);
+  try
+    ms.RegisterBuiltins;
+
+    { エラーのあるマクロは実行しない }
+    host.Log.Clear;
+    rr := runner.Execute('<TX>CQ de <MYCALL> k', ctx);   { <RX> が無い }
+    Check(not rr.Started, 'エラーのあるマクロは実行されない');
+    Check(host.Log.Count = 0, '拒否時は宿主が一切呼ばれない');
+    Check(Pos('電波を出し続けます', rr.RefusalReason) > 0, '拒否理由が分かる');
+
+    { 交換を受け取る前のログはエラー }
+    ctx.ClearWorkedStation;
+    ctx.Call := 'JA1ZZZ';      { qpAnswered まで }
+    rr := runner.Execute('<TX>TU<RX><LOG>', ctx);
+    Check(not rr.Started, '交換を受け取る前のログは実行されない');
+    Check(Pos('交換を受け取る前', rr.RefusalReason) > 0,
+      '局面に基づく拒否理由が出る');
+
+    { 局面が合わないマクロは警告どまり (押した本人の判断を尊重) }
+    ctx.ClearWorkedStation;
+    rr := runner.ExecuteNamed('73', ctx);   { qpIdle なのに 73 }
+    Check(not rr.Started,
+      '相手不在で 73 は実行されない (ログ内容が空のため)');
+
+    { デュープは止めない }
+    ctx.ClearWorkedStation;
+    ctx.Call := 'JA1ZZZ';
+    ctx.RstRcvd := '599';
+    ctx.IsDuplicate := True;
+    rr := runner.ExecuteNamed('TU', ctx);
+    Check(rr.Started, 'デュープでも実行は止めない (得点0で記録する運用がある)');
+
+    { 中断 }
+    host.AutoFinishTx := False;
+    ctx.ClearWorkedStation;
+    rr := runner.Execute('<TX>CQ de <MYCALL> k<RX>', ctx);
+    Check(runner.Busy, '送信終了待ちで実行中');
+    runner.Abort;
+    Check(runner.State = mrsAborted, '中断できる');
+    Check(not runner.Busy, '中断後は実行中でない');
+    host.AutoFinishTx := True;
+
+    { 差し替え方針 }
+    host.AutoFinishTx := False;
+    rr := runner.Execute('<TX>A<RX>', ctx);
+    Check(runner.Busy, '前提: 実行中');
+    runner.BusyPolicy := mbpReplace;
+    rr := runner.Execute('<TX>B<RX>', ctx);
+    Check(rr.Started, 'mbpReplace なら実行中でも差し替えられる');
+    runner.BusyPolicy := mbpReject;
+    host.AutoFinishTx := True;
+    runner.Abort;
+
+    { 想定外の折り返しは無視する }
+    runner.NotifyTxFinished;
+    Check(True, '実行していないときの折り返しは無視される');
+
+    { 展開器が無い }
+    runner.Expander := nil;
+    try
+      runner.Execute('x', ctx);
+      Check(False, '展開器が無ければ例外');
+    except
+      on E: EMacroError do Check(True, '展開器が無ければ EMacroError');
+    end;
+    runner.Expander := ex;
+  finally
+    runner.Free;
+    host.Free;
+    ex.Free;
+    ms.Free;
+    ctx.Free;
+  end;
+end;
+
+procedure TestStationInfoBridge;
+{ 運用プロファイルの実効値がマクロまで届くこと。
+  ここが切れていると、移動運用でコールが /1 になってもマクロは
+  古いコールを送り続ける。 }
+var
+  ctx: TMacroContext;
+  info: TStationInfo;
+  ex: TMacroExpander;
+  r: TMacroExpansion;
+begin
+  WriteLn;
+  WriteLn('--- 16. 局情報からコンテキストへの流し込み ---');
+  ctx := TMacroContext.Create;
+  info := TStationInfo.Create;
+  ex := TMacroExpander.Create;
+  try
+    info.MyCall := 'JI1UUI/1';
+    info.MyName := 'Noma';
+    info.MyQth := 'Chichibu';
+    info.MyLocator := 'PM95';
+    info.MyAntenna := 'Whip';
+    info.MyRig := 'IC-705';
+    info.MyPowerW := 5;
+
+    ctx.LoadFromStationInfo(info);
+    r := ex.Expand('<MYCALL> <MYRIG> <MYPWR>W <MYANT> <MYQTH>', ctx);
+    CheckEq(r.PlainText, 'JI1UUI/1 IC-705 5W Whip Chichibu',
+      '局情報の全項目がマクロへ届く');
+  finally
+    ex.Free;
+    info.Free;
     ctx.Free;
   end;
 end;
@@ -742,7 +1086,13 @@ begin
   TestMacroSetPersistence;
   TestBuiltinsAreSafe;
   TestEdgeCases;
-  TestRunner;
+  TestPhaseTracking;
+  TestSequenceSelection;
+  TestAsyncSequence;
+  TestPostLogTransition;
+  TestFullQsoSequence;
+  TestRunnerGuards;
+  TestStationInfoBridge;
 
   WriteLn;
   WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 (全 ', TestCount, ' 件中) ===');

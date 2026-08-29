@@ -74,10 +74,45 @@ unit MacroEngine;
 interface
 
 uses
-  Classes, SysUtils, DateUtils, StrUtils, fpjson, jsonparser, SafeFileIO;
+  Classes, SysUtils, DateUtils, StrUtils, fpjson, jsonparser,
+  SafeFileIO, StationInfo;
 
 type
   EMacroError = class(Exception);
+
+  { --- 交信における「立場」 ---
+    同じ局面でも、CQ を出している側と呼んでいる側では送る内容が違う。
+    ラバースタンプでもコンテストでも、この区別なしに「次に送るべきもの」は
+    決まらない。 }
+  TQsoRole = (
+    qrRun,           // CQ を出して呼ばれる側
+    qrSearchPounce   // 相手の CQ を探して呼ぶ側
+  );
+
+  { --- 交信の局面 ---
+    定型交信は状態機械である。どの局面にいるかで「次に送るもの」も
+    「今ログしてよいか」も決まる。
+    以前の設計はこれを持たず、値の入れ物しか無かったため、
+      - 交換を受け取る前にログできてしまう
+      - ログ後も相手のコールが残り、次の交信で誤ったコールを送る
+      - 「次に押すべきキー」を提示できない
+    という穴があった。 }
+  TQsoPhase = (
+    qpIdle,          // 相手がいない (CQ を出す / 相手を探す)
+    qpCalling,       // 呼びかけた (CQ 送出済み / 相手を呼んだ)
+    qpAnswered,      // 相手のコールサインを取得した
+    qpExchangeSent,  // レポート/ナンバーを送った
+    qpExchangeRcvd,  // 相手のレポート/ナンバーを受け取った (ログ可)
+    qpConfirmed      // TU/73 を送った
+  );
+  TQsoPhaseSet = set of TQsoPhase;
+
+  { マクロがどちらの立場のものか。 }
+  TMacroRoleFilter = (
+    mrfAny,          // どちらでも使う
+    mrfRun,
+    mrfSearchPounce
+  );
 
   { マクロが呼び出し側に依頼する操作。
     fldigi では expand() の中で直接実行されるが、本ユニットは
@@ -193,6 +228,20 @@ type
     FExchangeIn: string;
 
     FFixedUtcNow: TDateTime;
+
+    FRole: TQsoRole;
+    FPhase: TQsoPhase;
+    FIsDuplicate: Boolean;
+
+    { 相手局の値が入ったら局面を前へ進める (後戻りはしない)。
+      オペレータが「コールを打ち込む」「レポートを受け取る」という
+      自然な操作だけで局面が正しく進むようにするための仕掛けで、
+      これがないと局面管理が「別途やる作業」になり必ず忘れられる。 }
+    procedure AdvancePhaseTo(APhase: TQsoPhase);
+    procedure SetCall(const AValue: string);
+    procedure SetRstRcvd(const AValue: string);
+    procedure SetSerialIn(const AValue: string);
+    procedure SetExchangeIn(const AValue: string);
   public
     constructor Create;
 
@@ -206,9 +255,22 @@ type
     procedure CommitSerial;
     procedure ResetSerial(AStart: Integer = 1);
 
-    { 相手局に関する項目だけを消す (次の交信へ移るとき)。
-      自局・運用状態・送信ナンバーは残る。 }
+    { 相手局に関する項目だけを消し、局面を qpIdle へ戻す
+      (次の交信へ移るとき)。自局・運用状態・送信ナンバーは残る。
+      ログ成功時に TMacroRunner が自動的に呼ぶ ― 以前はこれを
+      実装だけして誰も呼んでおらず、ログ後も前の局のコールが残って
+      次の交信で誤ったコールサインを送る状態だった。 }
     procedure ClearWorkedStation;
+
+    { 自局の値を TStationInfo から流し込む。
+      OpProfile の解決結果は TResolvedStation.ToStationInfo で
+      TStationInfo に落ちるので、
+        Registry.Resolve(...).ToStationInfo(info);
+        ctx.LoadFromStationInfo(info);
+      という2段で運用プロファイルの実効値がマクロまで届く。
+      これをしないと、移動運用でコールが JI1UUI/1 に変わっても
+      マクロは古いコールを送り続ける。 }
+    procedure LoadFromStationInfo(AStationInfo: TStationInfo);
 
     { --- 自局 --- }
     property MyCall: string read FMyCall write FMyCall;
@@ -220,12 +282,15 @@ type
     property MyPowerW: Integer read FMyPowerW write FMyPowerW;
 
     { --- 相手局 --- }
-    property Call: string read FCall write FCall;
+    { 相手のコールが入った時点で局面は qpAnswered へ進む。 }
+    property Call: string read FCall write SetCall;
     property Name: string read FName write FName;
     property Qth: string read FQth write FQth;
     property Locator: string read FLocator write FLocator;
     property RstSent: string read FRstSent write FRstSent;
-    property RstRcvd: string read FRstRcvd write FRstRcvd;
+    { 相手のレポートが入った時点で局面は qpExchangeRcvd へ進む
+      (= ログしてよい状態)。 }
+    property RstRcvd: string read FRstRcvd write SetRstRcvd;
 
     { --- 運用状態 --- }
     property Band: string read FBand write FBand;
@@ -238,12 +303,22 @@ type
     property SerialOut: Integer read FSerialOut write FSerialOut;
     { 送信ナンバーのゼロ詰め桁数 (既定 3 = 001)。 }
     property SerialDigits: Integer read FSerialDigits write FSerialDigits;
-    property SerialIn: string read FSerialIn write FSerialIn;
+    property SerialIn: string read FSerialIn write SetSerialIn;
     property ExchangeOut: string read FExchangeOut write FExchangeOut;
-    property ExchangeIn: string read FExchangeIn write FExchangeIn;
+    property ExchangeIn: string read FExchangeIn write SetExchangeIn;
 
     { 0 以外なら UtcNow がこの値を返す (テスト用)。 }
     property FixedUtcNow: TDateTime read FFixedUtcNow write FFixedUtcNow;
+
+    { --- 局面 --- }
+    { CQ を出す側か、呼ぶ側か。 }
+    property Role: TQsoRole read FRole write FRole;
+    { 現在の局面。通常は値の投入で自動的に進むので、
+      直接書くのは「取り消し」「やり直し」のような明示操作のときだけ。 }
+    property Phase: TQsoPhase read FPhase write FPhase;
+    { この相手と既に交信済みか (コンテストのデュープ)。
+      呼び出し側が TContestLog.IsDuplicate 等を見て設定する。 }
+    property IsDuplicate: Boolean read FIsDuplicate write FIsDuplicate;
   end;
 
   { 1つのマクロ定義。 }
@@ -253,13 +328,36 @@ type
     FText: string;
     FNote: string;
     FCategory: TMacroCategory;
+    FRoleFilter: TMacroRoleFilter;
+    FValidPhases: TQsoPhaseSet;
+    FResultPhase: TQsoPhase;
+    FHasResultPhase: Boolean;
   public
     constructor Create(const AName, AText: string;
       ACategory: TMacroCategory = mcGeneral; const ANote: string = '');
+
+    { このマクロが「いつ使うものか」を宣言する。
+      これがあると
+        - 局面に合わないマクロを押したときに警告できる
+        - 「次に押すべきマクロ」を提示できる (ESM: Enter Sends Message)
+      の両方が成り立つ。宣言しなければ従来どおり「いつでも使える」。 }
+    procedure DeclareSequence(ARole: TMacroRoleFilter;
+      AValidPhases: TQsoPhaseSet; AResultPhase: TQsoPhase);
+    procedure ClearSequence;
+
+    { 指定の立場・局面で使うマクロか。 }
+    function MatchesSequence(ARole: TQsoRole; APhase: TQsoPhase): Boolean;
+
     property Name: string read FName write FName;
     property Text: string read FText write FText;
     property Note: string read FNote write FNote;
     property Category: TMacroCategory read FCategory write FCategory;
+    property RoleFilter: TMacroRoleFilter read FRoleFilter write FRoleFilter;
+    { 空集合 = どの局面でも使える。 }
+    property ValidPhases: TQsoPhaseSet read FValidPhases write FValidPhases;
+    { 実行後に遷移する局面 (HasResultPhase が True のときのみ有効)。 }
+    property ResultPhase: TQsoPhase read FResultPhase;
+    property HasResultPhase: Boolean read FHasResultPhase;
   end;
 
   { マクロの一覧。ファンクションキーへの割り当ては呼び出し側 (UI) の責務とし、
@@ -284,6 +382,13 @@ type
     function Find(const AName: string): TMacroDefinition;
     function IndexOf(const AName: string): Integer;
     function Remove(const AName: string): Boolean;
+
+    { 指定の立場・局面で「次に使うべき」マクロを返す (見つからなければ nil)。
+      ESM (Enter Sends Message) の土台になる。オペレータが局面ごとに
+      正しいキーを覚える必要が無くなり、コンテストの速度に効く。
+      複数該当する場合は登録順で最初のものを返す。 }
+    function FindForSequence(ARole: TQsoRole;
+      APhase: TQsoPhase): TMacroDefinition;
 
     { ラバースタンプ交信とコンテスト運用の標準セットを登録する。
       「何から書き始めればいいか分からない」状態を避けるための出発点であり、
@@ -338,8 +443,11 @@ type
     { 展開結果を送信前に検査し、Issues を追加して返す。
       Expand が「書き方の問題」(未知タグ等) を見るのに対し、こちらは
       「今この状況で送っていいか」を見る。 }
+    { ADefinition を渡すと、そのマクロが宣言した「使うべき局面」と
+      現在の局面が食い違っていないかも見る (押し間違いの検出)。 }
     function Validate(const AExpansion: TMacroExpansion;
-      ACtx: TMacroContext): TMacroExpansion;
+      ACtx: TMacroContext;
+      ADefinition: TMacroDefinition = nil): TMacroExpansion;
 
     { 展開と検査をまとめて行う (送信ボタンから呼ぶ入口)。 }
     function Prepare(const AText: string; ACtx: TMacroContext): TMacroExpansion;
@@ -354,66 +462,165 @@ type
       read FStrictUnknownTags write FStrictUnknownTags;
   end;
 
+  TMacroRunner = class;
+
   { --- マクロを実際に実行するための宿主 ---
     展開結果 (TMacroSegment の列) を「誰が」実行するかを抽象化する。
     実機ではフォームがこれを実装し、TModemEngine / TCustomRigControl /
     TQsoLogbook へ配線する。テストでは記録するだけの実装を差し込む。
 
-    この境界を作る理由は 2 つある。
-      1. マクロの実行順序という論理を、GUI や無線機なしで検証できる
-      2. fldigi のように展開器が trx_transmit() を直接呼ぶ形にすると、
-         マクロを 1 つ試すたびに実機一式が要る }
+    【重要: 非同期の契約】
+    送信は実時間で数秒から十数秒かかる。同期的に「送って戻る」ことはできない。
+    そこで時間のかかる操作は「依頼」で、完了は宿主から Runner へ折り返す。
+
+      RequestReceive  : 送信バッファを送り切ってから受信へ戻し、
+                        完了したら Runner.NotifyTxFinished を呼ぶ
+      StartTimer      : 指定秒後に Runner.NotifyTimerElapsed を呼ぶ
+
+    この折り返しがあって初めて、<RX> の後ろに置いた <LOG> が
+    「本当に送信し終わってから」実行される。以前の同期実装では
+    送信をキューに積んだ直後にログしており、送信を中断してもログが
+    残り、ADIF の TIME_OFF も実際の交信終了より前になっていた。
+
+    【スレッド】Runner のメソッドはすべて同じスレッド (通常は UI スレッド)
+    から呼ぶこと。宿主が別スレッドで送信完了を検出した場合は、
+    TThread.Queue 等で UI スレッドへ渡してから Notify を呼ぶ。
+    違反は EMacroError として検出される。 }
   TMacroHost = class abstract
+  private
+    FRunner: TMacroRunner;
   public
-    { 送信バッファへ本文を積む (実際に電波に乗るのは送信中のみ)。 }
+    { 送信バッファへ本文を積む。 }
     procedure SendText(const AText: string); virtual; abstract;
+    { 送信を開始する (即時)。 }
     procedure StartTransmit; virtual; abstract;
-    { 送信バッファを送り切ってから受信へ戻る。 }
-    procedure StopTransmit; virtual; abstract;
-    { 送信を即時中止する (バッファは捨てる)。 }
+    { 送信バッファを送り切ってから受信へ戻す。
+      完了したら Runner.NotifyTxFinished を呼ぶこと。 }
+    procedure RequestReceive; virtual; abstract;
+    { 送信を即時中止する (バッファは捨てる)。完了通知は不要。 }
     procedure AbortTransmit; virtual; abstract;
     { 現在の交信をログに記録する。戻り値が True のときだけ
-      送信ナンバーが次へ進む。 }
+      送信ナンバーが進み、相手局情報が消える。 }
     function LogCurrentQso: Boolean; virtual; abstract;
     procedure ClearRxWindow; virtual; abstract;
     procedure ClearTxWindow; virtual; abstract;
     procedure SetMode(const AMode: string); virtual; abstract;
     procedure SetFreqMHz(AFreqMHz: Double); virtual; abstract;
-    { ASeconds 秒待つ。実装側で中断可能にしてよい。 }
-    procedure Wait(ASeconds: Double); virtual; abstract;
+    { ASeconds 秒後に Runner.NotifyTimerElapsed を呼ぶこと。 }
+    procedure StartTimer(ASeconds: Double); virtual; abstract;
+
+    { 実行中の Runner。TMacroRunner が Host を設定するときに自動で入る。 }
+    property Runner: TMacroRunner read FRunner write FRunner;
   end;
 
-  { マクロ実行の結果。 }
+  { マクロ実行の進行状態。 }
+  TMacroRunState = (
+    mrsIdle,          // 実行していない
+    mrsWaitingTxEnd,  // <RX> の送信終了待ち
+    mrsWaitingTimer,  // <WAIT:n> の経過待ち
+    mrsDone,          // 最後まで実行した
+    mrsAborted        // 中断した
+  );
+
+  { 実行中に別のマクロを起動しようとしたときの扱い。 }
+  TMacroBusyPolicy = (
+    mbpReject,        // 拒否する (既定。誤操作で送信内容が混ざらない)
+    mbpReplace        // 実行中のものを中断して差し替える
+  );
+
+  { マクロ実行の結果 (起動時点で分かること)。 }
   TMacroRunResult = record
-    Executed: Boolean;      // 実行したか (エラーで拒否した場合 False)
-    ActionsRun: Integer;
-    TextSent: Integer;      // 送信バッファへ積んだ回数
-    Logged: Boolean;        // ログ記録が行われ、成功したか
-    SerialAdvanced: Boolean;// 送信ナンバーが進んだか
-    RefusalReason: string;  // Executed=False のときの理由
+    Started: Boolean;       // 実行を開始したか
+    Logged: Boolean;        // ログ記録が行われ成功したか (完了時に確定)
+    SerialAdvanced: Boolean;
+    Completed: Boolean;     // 待ちに入らず最後まで走り切ったか
+    RefusalReason: string;  // Started=False のときの理由
   end;
 
-  { 展開結果を宿主へ流し込む実行器。 }
+  { 実行完了の通知。 }
+  TMacroDoneEvent = procedure(Sender: TMacroRunner;
+    ACompleted: Boolean) of object;
+
+  { --- 展開結果を宿主へ流し込む実行器 (状態機械) ---
+    断片を順に処理し、時間のかかる操作 (<RX>/<WAIT>) に当たったら
+    そこで止まって宿主からの折り返しを待つ。 }
   TMacroRunner = class
   private
     FHost: TMacroHost;
+    FExpander: TMacroExpander;
     FAllowWithWarnings: Boolean;
-  public
-    constructor Create(AHost: TMacroHost);
+    FBusyPolicy: TMacroBusyPolicy;
+    FClearAfterLog: Boolean;
+    FStepTimeoutSec: Integer;
 
-    { 展開結果を実行する。
-      エラー (milError) が 1 件でもあれば実行を拒否する。これが
-      「送信前バリデーション」が実効性を持つ唯一の場所である
-      ― 検査しても実行を止めなければ意味がない。
-      AForce=True で強行できるが、通常は使わない。 }
-    function Run(const AExpansion: TMacroExpansion; ACtx: TMacroContext;
+    FState: TMacroRunState;
+    FSegments: TMacroSegmentArray;
+    FIndex: Integer;               // 次に処理する断片
+    FCtx: TMacroContext;
+    FDefinition: TMacroDefinition; // 実行中マクロ (順序遷移の適用に使う)
+    FOwnerThreadId: TThreadID;
+    FStepStartedAt: TDateTime;
+    FLogged: Boolean;
+    FSerialAdvanced: Boolean;
+    FOnDone: TMacroDoneEvent;
+
+    procedure SetHost(AValue: TMacroHost);
+    procedure CheckThread;
+    { 展開・検査・実行の本体。ADefinition は順序の検査と遷移に使う
+      (名前で起動したときだけ渡る)。 }
+    function ExecuteInternal(const AText: string; ACtx: TMacroContext;
+      ADefinition: TMacroDefinition; AForce: Boolean): TMacroRunResult;
+    { 断片を進められるところまで進める。 }
+    procedure Step;
+    procedure FinishRun(AState: TMacroRunState);
+    procedure ApplyResultPhase;
+    { 待ちが長すぎる場合に自動で中断する (宿主が折り返しを忘れても
+      永久に Busy のままにならないようにするための保険)。 }
+    procedure CheckStepTimeout;
+    function GetBusy: Boolean;
+  public
+    constructor Create(AHost: TMacroHost; AExpander: TMacroExpander = nil);
+
+    { --- 実行の入口 ---
+      展開・検査・実行を 1 回の呼び出しにまとめてある。
+      以前は Prepare して Run に渡す形だったが、その間にコンテキストが
+      書き換わると「検査した状態と違う状態で送る」ことになり、
+      しかも型の上では別のコンテキストで検査した結果すら渡せた。
+      不可分にすることでその隙間を無くしている。
+      プレビューが必要なときは TMacroExpander.Prepare を別途使う
+      (表示専用。実行はこちらが再展開する)。 }
+    function Execute(const AText: string; ACtx: TMacroContext;
+      AForce: Boolean = False): TMacroRunResult;
+    function ExecuteNamed(const AName: string; ACtx: TMacroContext;
+      AForce: Boolean = False): TMacroRunResult;
+    { 現在の立場・局面に合ったマクロを選んで実行する
+      (ESM: Enter Sends Message)。該当が無ければ実行しない。 }
+    function ExecuteForSequence(ACtx: TMacroContext;
       AForce: Boolean = False): TMacroRunResult;
 
-    property Host: TMacroHost read FHost write FHost;
-    { 警告 (milWarning) があっても実行するか (既定 True)。
-      False にすると「RST が空」等でも止まる。 }
+    { --- 宿主からの折り返し --- }
+    procedure NotifyTxFinished;
+    procedure NotifyTimerElapsed;
+
+    { 実行中のマクロを中断する。 }
+    procedure Abort;
+
+    property Host: TMacroHost read FHost write SetHost;
+    property Expander: TMacroExpander read FExpander write FExpander;
+    property State: TMacroRunState read FState;
+    { 実行中か (待ち状態を含む)。 }
+    property Busy: Boolean read GetBusy;
+    property Logged: Boolean read FLogged;
+
     property AllowWithWarnings: Boolean
       read FAllowWithWarnings write FAllowWithWarnings;
+    { 実行中に別のマクロを起動したときの扱い (既定 mbpReject)。 }
+    property BusyPolicy: TMacroBusyPolicy read FBusyPolicy write FBusyPolicy;
+    { ログ成功時に相手局情報を消して局面を戻すか (既定 True)。 }
+    property ClearAfterLog: Boolean read FClearAfterLog write FClearAfterLog;
+    { 1 つの待ちに許す秒数 (既定 120)。超えたら自動的に中断する。 }
+    property StepTimeoutSec: Integer read FStepTimeoutSec write FStepTimeoutSec;
+    property OnDone: TMacroDoneEvent read FOnDone write FOnDone;
   end;
 
 { 送信ナンバーをゼロ詰めした文字列にする (3桁なら 7 -> "007")。 }
@@ -427,6 +634,14 @@ function ToCutNumbers(const AText: string): string;
 function MacroCategoryToStr(ACategory: TMacroCategory): string;
 function StrToMacroCategory(const AStr: string): TMacroCategory;
 function MacroIssueLevelToStr(ALevel: TMacroIssueLevel): string;
+
+function QsoPhaseToStr(APhase: TQsoPhase): string;
+function StrToQsoPhase(const AStr: string): TQsoPhase;
+function QsoPhaseSetToStr(APhases: TQsoPhaseSet): string;
+function StrToQsoPhaseSet(const AStr: string): TQsoPhaseSet;
+function MacroRoleFilterToStr(ARole: TMacroRoleFilter): string;
+function StrToMacroRoleFilter(const AStr: string): TMacroRoleFilter;
+function QsoPhaseDescription(APhase: TQsoPhase): string;
 
 implementation
 
@@ -490,6 +705,98 @@ begin
     milWarning: Result := '警告';
   else
     Result := '情報';
+  end;
+end;
+
+function QsoPhaseToStr(APhase: TQsoPhase): string;
+begin
+  case APhase of
+    qpCalling:      Result := 'calling';
+    qpAnswered:     Result := 'answered';
+    qpExchangeSent: Result := 'exchangeSent';
+    qpExchangeRcvd: Result := 'exchangeRcvd';
+    qpConfirmed:    Result := 'confirmed';
+  else
+    Result := 'idle';
+  end;
+end;
+
+function StrToQsoPhase(const AStr: string): TQsoPhase;
+var
+  t: string;
+begin
+  t := LowerCase(Trim(AStr));
+  if t = 'calling' then Result := qpCalling
+  else if t = 'answered' then Result := qpAnswered
+  else if t = 'exchangesent' then Result := qpExchangeSent
+  else if t = 'exchangercvd' then Result := qpExchangeRcvd
+  else if t = 'confirmed' then Result := qpConfirmed
+  else Result := qpIdle;
+end;
+
+function QsoPhaseSetToStr(APhases: TQsoPhaseSet): string;
+var
+  p: TQsoPhase;
+begin
+  Result := '';
+  for p := Low(TQsoPhase) to High(TQsoPhase) do
+    if p in APhases then
+    begin
+      if Result <> '' then Result := Result + ',';
+      Result := Result + QsoPhaseToStr(p);
+    end;
+end;
+
+function StrToQsoPhaseSet(const AStr: string): TQsoPhaseSet;
+var
+  parts: TStringList;
+  i: Integer;
+begin
+  Result := [];
+  if Trim(AStr) = '' then Exit;
+  parts := TStringList.Create;
+  try
+    parts.Delimiter := ',';
+    parts.StrictDelimiter := True;
+    parts.DelimitedText := AStr;
+    for i := 0 to parts.Count - 1 do
+      if Trim(parts[i]) <> '' then
+        Include(Result, StrToQsoPhase(parts[i]));
+  finally
+    parts.Free;
+  end;
+end;
+
+function MacroRoleFilterToStr(ARole: TMacroRoleFilter): string;
+begin
+  case ARole of
+    mrfRun:          Result := 'run';
+    mrfSearchPounce: Result := 'searchPounce';
+  else
+    Result := 'any';
+  end;
+end;
+
+function StrToMacroRoleFilter(const AStr: string): TMacroRoleFilter;
+var
+  t: string;
+begin
+  t := LowerCase(Trim(AStr));
+  if t = 'run' then Result := mrfRun
+  else if t = 'searchpounce' then Result := mrfSearchPounce
+  else Result := mrfAny;
+end;
+
+function QsoPhaseDescription(APhase: TQsoPhase): string;
+begin
+  case APhase of
+    qpCalling:      Result := '呼びかけ中';
+    qpAnswered:     Result := '相手のコールを取得';
+    qpExchangeSent: Result := 'レポート/ナンバー送出済み';
+    qpExchangeRcvd: Result := 'レポート/ナンバー受領済み';
+    qpConfirmed:    Result := '確認送出済み';
+  else
+    Result := '相手なし';
   end;
 end;
 
@@ -592,6 +899,57 @@ begin
   FSerialOut := 1;
   FSerialDigits := DEFAULT_SERIAL_DIGITS;
   FFixedUtcNow := 0;
+  FRole := qrRun;
+  FPhase := qpIdle;
+  FIsDuplicate := False;
+end;
+
+procedure TMacroContext.AdvancePhaseTo(APhase: TQsoPhase);
+begin
+  { 前へだけ進める。値を入れ直しても局面が戻らないようにするため
+    (「レポートを打ち直したら未受領に戻った」では困る)。 }
+  if APhase > FPhase then
+    FPhase := APhase;
+end;
+
+procedure TMacroContext.SetCall(const AValue: string);
+begin
+  FCall := AValue;
+  if Trim(AValue) <> '' then
+    AdvancePhaseTo(qpAnswered);
+end;
+
+procedure TMacroContext.SetRstRcvd(const AValue: string);
+begin
+  FRstRcvd := AValue;
+  if Trim(AValue) <> '' then
+    AdvancePhaseTo(qpExchangeRcvd);
+end;
+
+procedure TMacroContext.SetSerialIn(const AValue: string);
+begin
+  FSerialIn := AValue;
+  if Trim(AValue) <> '' then
+    AdvancePhaseTo(qpExchangeRcvd);
+end;
+
+procedure TMacroContext.SetExchangeIn(const AValue: string);
+begin
+  FExchangeIn := AValue;
+  if Trim(AValue) <> '' then
+    AdvancePhaseTo(qpExchangeRcvd);
+end;
+
+procedure TMacroContext.LoadFromStationInfo(AStationInfo: TStationInfo);
+begin
+  if not Assigned(AStationInfo) then Exit;
+  FMyCall := AStationInfo.MyCall;
+  FMyName := AStationInfo.MyName;
+  FMyQth := AStationInfo.MyQth;
+  FMyLocator := AStationInfo.MyLocator;
+  FMyAntenna := AStationInfo.MyAntenna;
+  FMyRig := AStationInfo.MyRig;
+  FMyPowerW := AStationInfo.MyPowerW;
 end;
 
 function TMacroContext.UtcNow: TDateTime;
@@ -621,6 +979,8 @@ begin
   FRstRcvd := '';
   FSerialIn := '';
   FExchangeIn := '';
+  FIsDuplicate := False;
+  FPhase := qpIdle;   { 局面も戻す (ここだけは後戻りが正しい) }
 end;
 
 { ============================ TMacroDefinition ============================ }
@@ -633,6 +993,37 @@ begin
   FText := AText;
   FCategory := ACategory;
   FNote := ANote;
+  ClearSequence;
+end;
+
+procedure TMacroDefinition.DeclareSequence(ARole: TMacroRoleFilter;
+  AValidPhases: TQsoPhaseSet; AResultPhase: TQsoPhase);
+begin
+  FRoleFilter := ARole;
+  FValidPhases := AValidPhases;
+  FResultPhase := AResultPhase;
+  FHasResultPhase := True;
+end;
+
+procedure TMacroDefinition.ClearSequence;
+begin
+  FRoleFilter := mrfAny;
+  FValidPhases := [];
+  FResultPhase := qpIdle;
+  FHasResultPhase := False;
+end;
+
+function TMacroDefinition.MatchesSequence(ARole: TQsoRole;
+  APhase: TQsoPhase): Boolean;
+begin
+  Result := False;
+  case FRoleFilter of
+    mrfRun:          if ARole <> qrRun then Exit;
+    mrfSearchPounce: if ARole <> qrSearchPounce then Exit;
+  end;
+  { 空集合は「どの局面でも使える」= 順序の宣言をしていない }
+  if FValidPhases = [] then Exit;
+  Result := APhase in FValidPhases;
 end;
 
 { ============================ TMacroSet ============================ }
@@ -693,6 +1084,17 @@ begin
     Result := FItems[idx];
 end;
 
+function TMacroSet.FindForSequence(ARole: TQsoRole;
+  APhase: TQsoPhase): TMacroDefinition;
+var
+  i: Integer;
+begin
+  for i := 0 to High(FItems) do
+    if FItems[i].MatchesSequence(ARole, APhase) then
+      Exit(FItems[i]);
+  Result := nil;
+end;
+
 function TMacroSet.Add(const AName, AText: string;
   ACategory: TMacroCategory; const ANote: string): TMacroDefinition;
 var
@@ -736,25 +1138,34 @@ begin
 end;
 
 procedure TMacroSet.RegisterBuiltins;
+{ 標準セットは単なる文例集ではなく「立場 × 局面」の表である。
+  どの局面でも次に使うマクロが 1 つ決まるようにしてあり、
+  FindForSequence がそれを返す (ESM: Enter Sends Message の土台)。
+
+  ラバースタンプもコンテストも、交信は同じ形の状態機械で進む:
+
+    Run  (CQ を出す側)          S&P (呼ぶ側)
+    ------------------------    ------------------------
+    qpIdle        CQ            qpIdle        自局コール送出
+    qpCalling     (相手のコールを取得すると自動で qpAnswered)
+    qpAnswered    レポート送出   qpAnswered    レポート送出
+    qpExchangeSent(相手のレポート受領で自動で qpExchangeRcvd)
+    qpExchangeRcvd 確認 + ログ   qpExchangeRcvd 確認 + ログ
+
+  すべて <TX> で始めて <RX> で終える形に統一してあるのは、
+  雛形の段階で「送信したまま戻らない」形を排除するため。 }
+var
+  d: TMacroDefinition;
 begin
-  { --- ラバースタンプ交信の標準セット ---
-    fldigi の既定マクロ (macros.cxx の loadDefaults) を参考にしつつ、
-    国内運用でそのまま使える文面にしてある。
-    <TX> で始めて <RX> で終える形を徹底しているのは、
-    「送信したまま戻らない」事故を雛形の段階で防ぐため。 }
-  AddOrReplace('CQ',
+  { ============ ラバースタンプ (Run) ============ }
+  d := AddOrReplace('CQ',
     '<TX>' + sLineBreak +
     'CQ CQ CQ de <MYCALL> <MYCALL> <MYCALL> pse k' + sLineBreak +
     '<RX>',
     mcRubberStamp, 'CQ を出す');
+  d.DeclareSequence(mrfRun, [qpIdle], qpCalling);
 
-  AddOrReplace('応答',
-    '<TX>' + sLineBreak +
-    '<CALL> de <MYCALL> <MYCALL> kn' + sLineBreak +
-    '<RX>',
-    mcRubberStamp, '呼んできた局に応答する');
-
-  AddOrReplace('レポート',
+  d := AddOrReplace('レポート',
     '<TX>' + sLineBreak +
     '<CALL> de <MYCALL>' + sLineBreak +
     'GA OM ur rst <RST> <RST>' + sLineBreak +
@@ -763,57 +1174,95 @@ begin
     'hw? <CALL> de <MYCALL> kn' + sLineBreak +
     '<RX>',
     mcRubberStamp, 'RST・QTH・名前を送る (ラバースタンプの本体)');
+  d.DeclareSequence(mrfRun, [qpAnswered], qpExchangeSent);
 
-  AddOrReplace('リグ紹介',
-    '<TX>' + sLineBreak +
-    '<CALL> de <MYCALL>' + sLineBreak +
-    'tnx fb rpt. rig is <MYRIG> pwr <MYPWR>W' + sLineBreak +
-    'ant is <MYANT>' + sLineBreak +
-    '<CALL> de <MYCALL> kn' + sLineBreak +
-    '<RX>',
-    mcRubberStamp, 'リグ・アンテナ・出力を送る');
-
-  AddOrReplace('73',
+  d := AddOrReplace('73',
     '<TX>' + sLineBreak +
     '<CALL> de <MYCALL>' + sLineBreak +
     'tnx fb qso <NAME>. hpe cuagn. 73 es gl' + sLineBreak +
     '<CALL> de <MYCALL> sk' + sLineBreak +
-    '<LOG><RX>',
+    '<RX><LOG>',
     mcRubberStamp, '交信を終えてログに記録する');
+  d.DeclareSequence(mrfRun, [qpExchangeRcvd, qpConfirmed], qpConfirmed);
 
-  AddOrReplace('QRZ?',
+  { ============ ラバースタンプ (S&P) ============ }
+  d := AddOrReplace('呼ぶ',
+    '<TX><MYCALL> <MYCALL><RX>',
+    mcRubberStamp, '相手の CQ に対して自局のコールだけ送る');
+  d.DeclareSequence(mrfSearchPounce, [qpIdle], qpCalling);
+
+  d := AddOrReplace('応答レポート',
     '<TX>' + sLineBreak +
-    'QRZ? de <MYCALL> k' + sLineBreak +
+    '<CALL> de <MYCALL>' + sLineBreak +
+    'tnx fb call. ur rst <RST> <RST>' + sLineBreak +
+    'QTH <MYQTH> name <MYNAME>' + sLineBreak +
+    '<CALL> de <MYCALL> kn' + sLineBreak +
     '<RX>',
+    mcRubberStamp, '呼んで取ってもらえた後にレポートを送る');
+  d.DeclareSequence(mrfSearchPounce, [qpAnswered], qpExchangeSent);
+
+  d := AddOrReplace('73(S&P)',
+    '<TX>' + sLineBreak +
+    'tnx fb qso <NAME>. 73 es gl' + sLineBreak +
+    '<CALL> de <MYCALL> sk' + sLineBreak +
+    '<RX><LOG>',
+    mcRubberStamp, '呼んだ側として交信を終える');
+  d.DeclareSequence(mrfSearchPounce, [qpExchangeRcvd, qpConfirmed], qpConfirmed);
+
+  { ============ 順序に紐づかない補助 (どの局面でも使う) ============ }
+  AddOrReplace('QRZ?',
+    '<TX>QRZ? de <MYCALL> k<RX>',
     mcRubberStamp, 'コールサインが取れなかったときの聞き返し');
 
-  { --- コンテストの標準セット ---
-    ラバースタンプと違い、余計な語を入れないのが正義である。
-    ログ記録 (<LOG>) を交換の直後に置き、送信ナンバーの確定を
-    「相手に送った瞬間」ではなく「ログした瞬間」に紐付けている。 }
-  AddOrReplace('CQコンテスト',
+  AddOrReplace('リグ紹介',
+    '<TX>' + sLineBreak +
+    '<CALL> de <MYCALL>' + sLineBreak +
+    'rig is <MYRIG> pwr <MYPWR>W' + sLineBreak +
+    'ant is <MYANT>' + sLineBreak +
+    '<CALL> de <MYCALL> kn' + sLineBreak +
+    '<RX>',
+    mcRubberStamp, 'リグ・アンテナ・出力を送る (任意のタイミング)');
+
+  { ============ コンテスト (Run) ============
+    ラバースタンプと違い、余計な語を入れないのが正義である。 }
+  d := AddOrReplace('CQコンテスト',
     '<TX>CQ TEST de <MYCALL> <MYCALL> TEST<RX>',
     mcContest, 'コンテストの CQ (短く速く)');
+  d.DeclareSequence(mrfRun, [qpIdle], qpCalling);
 
-  AddOrReplace('交換',
+  d := AddOrReplace('交換',
     '<TX><CALL> <RST><#> <RST><#><RX>',
     mcContest, 'レポートと送信ナンバーを送る');
+  d.DeclareSequence(mrfRun, [qpAnswered], qpExchangeSent);
 
+  d := AddOrReplace('TU',
+    '<TX>TU <MYCALL> TEST<RX><LOG>',
+    mcContest, '交信成立。送信を終えてからログに記録する');
+  d.DeclareSequence(mrfRun, [qpExchangeRcvd, qpConfirmed], qpConfirmed);
+
+  { ============ コンテスト (S&P) ============ }
+  d := AddOrReplace('呼ぶ(コンテスト)',
+    '<TX><MYCALL><RX>',
+    mcContest, '相手の CQ に自局コールだけ送る');
+  d.DeclareSequence(mrfSearchPounce, [qpIdle], qpCalling);
+
+  d := AddOrReplace('交換(S&P)',
+    '<TX><RST><#> <RST><#><RX>',
+    mcContest, '取ってもらえた後にレポートとナンバーを送る');
+  d.DeclareSequence(mrfSearchPounce, [qpAnswered], qpExchangeSent);
+
+  d := AddOrReplace('TU(S&P)',
+    '<TX>TU <MYCALL><RX><LOG>',
+    mcContest, '呼んだ側として交信を終える');
+  d.DeclareSequence(mrfSearchPounce, [qpExchangeRcvd, qpConfirmed], qpConfirmed);
+
+  { ============ コンテストの補助 ============ }
   AddOrReplace('交換(カット)',
     '<TX><CALL> <RST><#CUT> <RST><#CUT><RX>',
     mcContest, 'CW用にカットナンバー (0=T, 9=N) で送る');
 
-  AddOrReplace('TU',
-    '<TX>TU <MYCALL> TEST<LOG><RX>',
-    mcContest, '交信成立。ログに記録して次の CQ へ');
-
-  AddOrReplace('AGN?',
-    '<TX>AGN AGN<RX>',
-    mcContest, '再送依頼');
-
-  AddOrReplace('NR?',
-    '<TX>NR? NR?<RX>',
-    mcContest, '送信ナンバーの再送依頼');
+  AddOrReplace('AGN?', '<TX>AGN AGN<RX>', mcContest, '再送依頼');
+  AddOrReplace('NR?', '<TX>NR? NR?<RX>', mcContest, '送信ナンバーの再送依頼');
 end;
 
 function TMacroSet.ToJsonString: string;
@@ -835,6 +1284,14 @@ begin
       o.Add('text', FItems[i].Text);
       o.Add('note', FItems[i].Note);
       o.Add('category', MacroCategoryToStr(FItems[i].Category));
+      { 順序の宣言。宣言していないマクロには書かない (旧形式と互換)。 }
+      if FItems[i].ValidPhases <> [] then
+      begin
+        o.Add('role', MacroRoleFilterToStr(FItems[i].RoleFilter));
+        o.Add('validPhases', QsoPhaseSetToStr(FItems[i].ValidPhases));
+        if FItems[i].HasResultPhase then
+          o.Add('resultPhase', QsoPhaseToStr(FItems[i].ResultPhase));
+      end;
       arr.Add(o);
     end;
     Result := root.FormatJSON;
@@ -851,6 +1308,8 @@ var
   o: TJSONObject;
   i: Integer;
   nm, tx, nt, cat: string;
+  def: TMacroDefinition;
+  phases: TQsoPhaseSet;
 begin
   Clear;
   if Trim(AJson) = '' then Exit;
@@ -875,7 +1334,11 @@ begin
       tx := o.Get('text', '');
       nt := o.Get('note', '');
       cat := o.Get('category', 'general');
-      Add(nm, tx, StrToMacroCategory(cat), nt);
+      def := Add(nm, tx, StrToMacroCategory(cat), nt);
+      phases := StrToQsoPhaseSet(o.Get('validPhases', ''));
+      if phases <> [] then
+        def.DeclareSequence(StrToMacroRoleFilter(o.Get('role', 'any')),
+          phases, StrToQsoPhase(o.Get('resultPhase', 'idle')));
     end;
   finally
     data.Free;
@@ -1228,7 +1691,7 @@ begin
 end;
 
 function TMacroExpander.Validate(const AExpansion: TMacroExpansion;
-  ACtx: TMacroContext): TMacroExpansion;
+  ACtx: TMacroContext; ADefinition: TMacroDefinition): TMacroExpansion;
 { 「今この状況で送っていいか」を見る。Expand が見るのは書き方の問題
   (未知タグ・引数の不正) で、こちらが見るのは運用上の問題である。
 
@@ -1244,7 +1707,7 @@ function TMacroExpander.Validate(const AExpansion: TMacroExpansion;
   そこで展開時に記録した UsedTags を使う。 }
 var
   i: Integer;
-  txSeen, rxAfterTx, textBeforeTx, hasLog, hasText: Boolean;
+  txSeen, rxAfterTx, textBeforeTx, textAfterRx, hasLog, hasText: Boolean;
 
   procedure Note(ALevel: TMacroIssueLevel; const ATag, AMsg: string);
   begin
@@ -1267,6 +1730,7 @@ begin
   txSeen := False;
   rxAfterTx := False;
   textBeforeTx := False;
+  textAfterRx := False;
   hasLog := False;
   hasText := False;
 
@@ -1278,6 +1742,8 @@ begin
         hasText := True;
         if not txSeen then
           textBeforeTx := True;
+        if rxAfterTx then
+          textAfterRx := True;
       end;
     end
     else
@@ -1301,10 +1767,14 @@ begin
       '送信を開始したあと受信に戻る <RX> がありません。' +
       'このまま実行すると電波を出し続けます');
 
-  { --- 2. 送信開始前の本文は電波に乗らない --- }
+  { --- 2. 送信開始前/受信復帰後の本文は今回の送信に乗らない --- }
   if textBeforeTx and txSeen then
     Note(milWarning, 'TX',
       '<TX> より前に本文があります。この部分は送信されません');
+  if textAfterRx then
+    Note(milWarning, 'RX',
+      '<RX> より後ろに本文があります。この部分は今回は送信されず、' +
+      '次に送信したときに出ます');
 
   if hasText and (not txSeen) then
     Note(milInfo, '',
@@ -1350,6 +1820,14 @@ begin
   { --- 4. ログ操作があるのに記録内容が埋まっていない --- }
   if hasLog then
   begin
+    { 局面での判定。交換を受け取る前にログするのは、
+      「相手のレポート/ナンバーが空のレコード」を作る操作であり、
+      コンテストでは提出ログが不備になる。 }
+    if ACtx.Phase < qpExchangeRcvd then
+      Note(milError, 'LOG',
+        '交換を受け取る前にログしようとしています (現在: ' +
+        QsoPhaseDescription(ACtx.Phase) + ')');
+
     if Trim(ACtx.Call) = '' then
       Note(milError, 'LOG',
         '相手局のコールサインが空のままログしようとしています');
@@ -1361,6 +1839,23 @@ begin
       Note(milWarning, 'LOG', '送信 RST が空のままログしようとしています');
     if Trim(ACtx.RstRcvd) = '' then
       Note(milWarning, 'LOG', '受信 RST が空のままログしようとしています');
+
+    { デュープはコンテストによっては「得点0で記録する」のが正しいので、
+      止めずに知らせるだけにする。 }
+    if ACtx.IsDuplicate then
+      Note(milWarning, 'LOG',
+        'この局とは既に交信済みです (デュープ)');
+  end;
+
+  { --- 5. 立場・局面に合わないマクロ --- }
+  if ADefinition <> nil then
+  begin
+    if (ADefinition.ValidPhases <> []) and
+       (not ADefinition.MatchesSequence(ACtx.Role, ACtx.Phase)) then
+      Note(milWarning, '',
+        'マクロ "' + ADefinition.Name + '" は現在の局面 (' +
+        QsoPhaseDescription(ACtx.Phase) +
+        ') 向けではありません。押し間違いでないか確認してください');
   end;
 end;
 
@@ -1372,94 +1867,334 @@ end;
 
 function TMacroExpander.PrepareNamed(const AName: string;
   ACtx: TMacroContext): TMacroExpansion;
+var
+  def: TMacroDefinition;
 begin
-  Result := Validate(ExpandNamed(AName, ACtx), ACtx);
+  def := nil;
+  if FMacros <> nil then
+    def := FMacros.Find(AName);
+  Result := Validate(ExpandNamed(AName, ACtx), ACtx, def);
 end;
 
 { ============================ TMacroRunner ============================ }
 
-constructor TMacroRunner.Create(AHost: TMacroHost);
+constructor TMacroRunner.Create(AHost: TMacroHost; AExpander: TMacroExpander);
 begin
   inherited Create;
-  FHost := AHost;
+  FExpander := AExpander;
   FAllowWithWarnings := True;
+  FBusyPolicy := mbpReject;
+  FClearAfterLog := True;
+  FStepTimeoutSec := 120;
+  FState := mrsIdle;
+  FIndex := 0;
+  FOwnerThreadId := 0;
+  SetHost(AHost);
 end;
 
-function TMacroRunner.Run(const AExpansion: TMacroExpansion;
-  ACtx: TMacroContext; AForce: Boolean): TMacroRunResult;
+procedure TMacroRunner.SetHost(AValue: TMacroHost);
+begin
+  if FHost = AValue then Exit;
+  if Assigned(FHost) and (FHost.Runner = Self) then
+    FHost.Runner := nil;
+  FHost := AValue;
+  if Assigned(FHost) then
+    FHost.Runner := Self;
+end;
+
+procedure TMacroRunner.CheckThread;
+{ 宿主が別スレッドから折り返すと、断片の進行が競合して
+  「送信中に次のマクロが割り込む」ような壊れ方をする。
+  黙って壊れるより、開発時に見える失敗にする。 }
+begin
+  if FOwnerThreadId = TThreadID(0) then Exit;
+  if GetCurrentThreadId <> FOwnerThreadId then
+    raise EMacroError.Create(
+      'TMacroRunner はマクロを開始したスレッドからのみ操作できます。' +
+      '宿主が別スレッドで送信完了を検出した場合は、' +
+      'TThread.Queue 等で UI スレッドへ渡してから通知してください');
+end;
+
+function TMacroRunner.GetBusy: Boolean;
+begin
+  CheckStepTimeout;
+  Result := FState in [mrsWaitingTxEnd, mrsWaitingTimer];
+end;
+
+procedure TMacroRunner.CheckStepTimeout;
 var
-  i: Integer;
+  elapsedSec: Double;
+begin
+  if not (FState in [mrsWaitingTxEnd, mrsWaitingTimer]) then Exit;
+  if FStepTimeoutSec <= 0 then Exit;
+  elapsedSec := (Now - FStepStartedAt) * SecsPerDay;
+  if elapsedSec > FStepTimeoutSec then
+  begin
+    { 宿主が折り返しを忘れた/失敗した。永久に Busy のままにすると
+      以後どのマクロも打てなくなるので、中断して解放する。 }
+    if Assigned(FHost) then
+      try
+        FHost.AbortTransmit;
+      except
+        on E: Exception do ;
+      end;
+    FinishRun(mrsAborted);
+  end;
+end;
+
+procedure TMacroRunner.ApplyResultPhase;
+begin
+  if (FDefinition = nil) or (not FDefinition.HasResultPhase) or (FCtx = nil) then
+    Exit;
+  { ログして相手局を消した直後は局面が qpIdle に戻っている。ここで
+    マクロの宣言 (TU なら qpConfirmed) をそのまま適用すると、
+    せっかく戻した局面が前へ跳ね返り、次の CQ が「確認送出済み」から
+    始まってしまう。ログできた交信は完了しているので、宣言は適用しない。 }
+  if FLogged and FClearAfterLog then Exit;
+  FCtx.AdvancePhaseTo(FDefinition.ResultPhase);
+end;
+
+procedure TMacroRunner.FinishRun(AState: TMacroRunState);
+var
+  completed: Boolean;
+begin
+  FState := AState;
+  FOwnerThreadId := 0;
+  SetLength(FSegments, 0);
+  FIndex := 0;
+  completed := AState = mrsDone;
+  if completed then
+    ApplyResultPhase;
+  FDefinition := nil;
+  if Assigned(FOnDone) then
+    FOnDone(Self, completed);
+end;
+
+procedure TMacroRunner.Step;
+{ 断片を順に処理し、待ちに入ったら抜ける。
+  待ちから復帰したときも同じ関数が続きから再開する。 }
+var
   seg: TMacroSegment;
 begin
-  Result.Executed := False;
-  Result.ActionsRun := 0;
-  Result.TextSent := 0;
-  Result.Logged := False;
-  Result.SerialAdvanced := False;
-  Result.RefusalReason := '';
-
-  if FHost = nil then
-    raise EMacroError.Create('マクロ実行の宿主 (TMacroHost) が設定されていません');
-  if ACtx = nil then
-    raise EMacroError.Create('実行コンテキストが nil です');
-
-  if not AForce then
+  while FIndex <= High(FSegments) do
   begin
-    if AExpansion.HasErrors then
-    begin
-      Result.RefusalReason := AExpansion.IssueText;
-      Exit;
-    end;
-    if (not FAllowWithWarnings) and AExpansion.HasWarnings then
-    begin
-      Result.RefusalReason := AExpansion.IssueText;
-      Exit;
-    end;
-  end;
+    seg := FSegments[FIndex];
+    Inc(FIndex);
 
-  Result.Executed := True;
-  for i := 0 to High(AExpansion.Segments) do
-  begin
-    seg := AExpansion.Segments[i];
     if seg.Kind = mskText then
     begin
       FHost.SendText(seg.Text);
-      Inc(Result.TextSent);
       Continue;
     end;
 
-    Inc(Result.ActionsRun);
     case seg.Action of
       makTransmit:  FHost.StartTransmit;
-      makReceive:   FHost.StopTransmit;
-      makAbortTx:   FHost.AbortTransmit;
       makClearRx:   FHost.ClearRxWindow;
       makClearTx:   FHost.ClearTxWindow;
       makSetMode:   FHost.SetMode(seg.Arg);
       makSetFreq:   FHost.SetFreqMHz(seg.ArgNum);
-      makWait:      FHost.Wait(seg.ArgNum);
+
+      makAbortTx:
+        begin
+          FHost.AbortTransmit;
+          FinishRun(mrsAborted);
+          Exit;
+        end;
+
+      makReceive:
+        begin
+          { ここが同期実装との決定的な違い。送信バッファを送り切るまで
+            戻らないので、この後ろの断片 (<LOG> 等) は本当に
+            送信し終わってから実行される。 }
+          FState := mrsWaitingTxEnd;
+          FStepStartedAt := Now;
+          FHost.RequestReceive;
+          Exit;
+        end;
+
+      makWait:
+        begin
+          FState := mrsWaitingTimer;
+          FStepStartedAt := Now;
+          FHost.StartTimer(seg.ArgNum);
+          Exit;
+        end;
+
       makLog:
         begin
           { 送信ナンバーが進むのはここだけ。ログが成功しなければ
             進めない ― 番号を飛ばすとコンテストのログ照合で減点される。 }
           if FHost.LogCurrentQso then
           begin
-            Result.Logged := True;
-            ACtx.CommitSerial;
-            Result.SerialAdvanced := True;
+            FLogged := True;
+            FCtx.CommitSerial;
+            FSerialAdvanced := True;
+            { ログできたら相手局は「済んだ相手」になる。ここで消さないと
+              次の交信で前の局のコールを送ってしまう。 }
+            if FClearAfterLog then
+              FCtx.ClearWorkedStation;
           end;
         end;
+
       makIncSerial:
         begin
-          ACtx.SerialOut := ACtx.SerialOut + 1;
-          Result.SerialAdvanced := True;
+          FCtx.SerialOut := FCtx.SerialOut + 1;
+          FSerialAdvanced := True;
         end;
+
       makDecSerial:
-        { 1 未満にはしない (コンテストナンバーは 1 始まり)。 }
-        if ACtx.SerialOut > 1 then
-          ACtx.SerialOut := ACtx.SerialOut - 1;
+        if FCtx.SerialOut > 1 then
+          FCtx.SerialOut := FCtx.SerialOut - 1;
     end;
   end;
+
+  FinishRun(mrsDone);
+end;
+
+function TMacroRunner.Execute(const AText: string; ACtx: TMacroContext;
+  AForce: Boolean): TMacroRunResult;
+begin
+  Result := ExecuteInternal(AText, ACtx, nil, AForce);
+end;
+
+function TMacroRunner.ExecuteInternal(const AText: string;
+  ACtx: TMacroContext; ADefinition: TMacroDefinition;
+  AForce: Boolean): TMacroRunResult;
+var
+  ex: TMacroExpansion;
+begin
+  Result.Started := False;
+  Result.Logged := False;
+  Result.SerialAdvanced := False;
+  Result.Completed := False;
+  Result.RefusalReason := '';
+
+  if FHost = nil then
+    raise EMacroError.Create('マクロ実行の宿主 (TMacroHost) が設定されていません');
+  if ACtx = nil then
+    raise EMacroError.Create('実行コンテキストが nil です');
+  if FExpander = nil then
+    raise EMacroError.Create('マクロ展開器 (TMacroExpander) が設定されていません');
+
+  if Busy then
+  begin
+    case FBusyPolicy of
+      mbpReject:
+        begin
+          Result.RefusalReason :=
+            '別のマクロを実行中です (' +
+            IfThen(FState = mrsWaitingTxEnd, '送信終了待ち', '待機中') + ')';
+          Exit;
+        end;
+      mbpReplace:
+        Abort;
+    end;
+  end;
+
+  { 展開と検査をここで行う。呼び出し側が古い展開結果を持ち込めないので、
+    「検査した状態」と「送る状態」が必ず一致する。 }
+  ex := FExpander.Validate(FExpander.Expand(AText, ACtx), ACtx, ADefinition);
+
+  if not AForce then
+  begin
+    if ex.HasErrors then
+    begin
+      Result.RefusalReason := ex.IssueText;
+      Exit;
+    end;
+    if (not FAllowWithWarnings) and ex.HasWarnings then
+    begin
+      Result.RefusalReason := ex.IssueText;
+      Exit;
+    end;
+  end;
+
+  FDefinition := ADefinition;
+  FSegments := ex.Segments;
+  FIndex := 0;
+  FCtx := ACtx;
+  FLogged := False;
+  FSerialAdvanced := False;
+  FState := mrsIdle;
+  FOwnerThreadId := GetCurrentThreadId;
+
+  Result.Started := True;
+  Step;
+
+  Result.Logged := FLogged;
+  Result.SerialAdvanced := FSerialAdvanced;
+  Result.Completed := FState = mrsDone;
+end;
+
+function TMacroRunner.ExecuteNamed(const AName: string; ACtx: TMacroContext;
+  AForce: Boolean): TMacroRunResult;
+var
+  def: TMacroDefinition;
+begin
+  if FExpander = nil then
+    raise EMacroError.Create('マクロ展開器 (TMacroExpander) が設定されていません');
+  if FExpander.Macros = nil then
+    raise EMacroError.Create('マクロ集が設定されていません');
+  def := FExpander.Macros.Find(AName);
+  if def = nil then
+    raise EMacroError.CreateFmt('マクロが見つかりません: %s', [AName]);
+  { 順序の宣言 (使うべき局面・実行後の局面) を検査と遷移に使う。 }
+  Result := ExecuteInternal(def.Text, ACtx, def, AForce);
+end;
+
+function TMacroRunner.ExecuteForSequence(ACtx: TMacroContext;
+  AForce: Boolean): TMacroRunResult;
+var
+  def: TMacroDefinition;
+begin
+  Result.Started := False;
+  Result.Logged := False;
+  Result.SerialAdvanced := False;
+  Result.Completed := False;
+  Result.RefusalReason := '';
+
+  if ACtx = nil then
+    raise EMacroError.Create('実行コンテキストが nil です');
+  if (FExpander = nil) or (FExpander.Macros = nil) then
+    raise EMacroError.Create('マクロ集が設定されていません');
+
+  def := FExpander.Macros.FindForSequence(ACtx.Role, ACtx.Phase);
+  if def = nil then
+  begin
+    Result.RefusalReason :=
+      '現在の局面 (' + QsoPhaseDescription(ACtx.Phase) +
+      ') に対応するマクロが登録されていません';
+    Exit;
+  end;
+  Result := ExecuteInternal(def.Text, ACtx, def, AForce);
+end;
+
+procedure TMacroRunner.NotifyTxFinished;
+begin
+  CheckThread;
+  if FState <> mrsWaitingTxEnd then Exit;   // 想定外の通知は無視する
+  FState := mrsIdle;
+  Step;
+end;
+
+procedure TMacroRunner.NotifyTimerElapsed;
+begin
+  CheckThread;
+  if FState <> mrsWaitingTimer then Exit;
+  FState := mrsIdle;
+  Step;
+end;
+
+procedure TMacroRunner.Abort;
+begin
+  if not (FState in [mrsWaitingTxEnd, mrsWaitingTimer]) then Exit;
+  if Assigned(FHost) then
+    try
+      FHost.AbortTransmit;
+    except
+      on E: Exception do ;
+    end;
+  FinishRun(mrsAborted);
 end;
 
 initialization

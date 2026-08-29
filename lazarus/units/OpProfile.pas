@@ -454,6 +454,11 @@ begin
   AStationInfo.MyQth     := City;
   AStationInfo.MyLocator := GridSquare;
   AStationInfo.MyAntenna := Antenna;
+  { TStationInfo に受け皿を追加したので、リグと出力もここで渡せるように
+    なった (以前は TResolvedStation で止まっていた)。
+    PowerW は免許上限で丸め済みの実効値である。 }
+  AStationInfo.MyRig     := Rig;
+  AStationInfo.MyPowerW  := PowerW;
 end;
 
 { ============================================================================
