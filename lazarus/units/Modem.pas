@@ -123,6 +123,22 @@ type
       本移植版では常に通知イベントも発火する (呼び出し側で頻度を制御する)。 }
     procedure SetMetric(AValue: Double); virtual;
 
+    { --- X-04: 送信シンボルの波形バッファ ---
+      送信は「1シンボルぶんの波形を作ってサウンドへ渡す」の繰り返しで、
+      RTTY 45baud なら毎秒 45 回、CW なら要素ごとに走る。
+      派生クラスがそのたびにローカルの動的配列を SetLength していたため、
+      送信中ずっと確保と解放が続いていた。FPC のメモリマネージャは
+      ロックを取るので、これは realtime 経路の deadline を脅かす
+      (v1.1 X-04 / Z-04)。基底クラスで一度だけ確保して使い回す。
+
+      【前提】1つのモデムインスタンスの送信は単一スレッドから行う
+      (ModemEngine が TxLoopStep を1本のワーカーで回す設計)。 }
+  protected
+    FTxSymbolBuf: array of Double;
+  protected
+    { 必要量を満たすまで伸ばす (縮めない)。 }
+    procedure EnsureTxBuf(ANeeded: Integer);
+
     { 派生クラスから復調結果を上位へ渡す唯一の経路。
       fldigi: put_rx_char(c) に相当するが、運ぶのは文字ではなく Evidence。 }
     procedure EmitDecode(const AEvidence: TDecodeEvidence);
@@ -365,6 +381,12 @@ end;
 procedure TCustomModem.SetCwXmtWPM(AValue: Double);
 begin
   FCwXmtWPM := AValue;
+end;
+
+procedure TCustomModem.EnsureTxBuf(ANeeded: Integer);
+begin
+  if Length(FTxSymbolBuf) < ANeeded then
+    SetLength(FTxSymbolBuf, ANeeded);
 end;
 
 procedure TCustomModem.EmitDecode(const AEvidence: TDecodeEvidence);

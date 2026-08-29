@@ -98,6 +98,19 @@ type
       粒度の粗い操作は、この専用ロックで丸ごと直列化する。
       ブロッキング入出力はこのロックを取らないので、Close は待たされない。 }
     FLifecycleLock: TCriticalSection;
+    { X-04: realtime 経路での動的確保を避けるための変換バッファ。
+      以前は ReadSamples / WriteSamples が呼び出しのたびにローカルの
+      動的配列を SetLength していた。8000Hz / 512サンプルなら毎秒 16 回、
+      さらに送信側でも同数の確保・解放が走る。FPC のメモリマネージャは
+      ロックを取るので、これが音声スレッドの deadline を脅かす
+      (Z-04 Deterministic Realtime)。
+      Open 時に必要量を確保し、以後は伸ばすだけにする。
+
+      【前提】1インスタンスは1方向 (Open の Direction で決まる) であり、
+      その方向の入出力は単一スレッドから行う。エンジンは RX 用と TX 用の
+      デバイスを別インスタンスで持つ設計なので、この前提は満たされる。 }
+    FIoBuf: array of Single;
+    procedure EnsureIoBuf(ANeeded: Integer);
     procedure DoClose;
     function FindDeviceIndex(const ANamePart: string; ANeedInput: Boolean): PaDeviceIndex;
     procedure CheckPaError(AErr: PaError; const AContext: string);
@@ -139,6 +152,12 @@ procedure PortAudioLibInit;
 procedure PortAudioLibDone;
 
 implementation
+
+const
+  { X-04: Open 時に先取りするフレーム数。ModemEngine の
+    MODEM_BLOCK_SIZE (512) に合わせてある。これより大きいブロックが
+    来たら EnsureIoBuf が一度だけ伸ばす。 }
+  DEFAULT_IO_FRAMES = 512;
 
 var
   GRefLock: TCriticalSection;
@@ -242,6 +261,13 @@ begin
   FLock.Free;
   FLifecycleLock.Free;
   inherited Destroy;
+end;
+
+procedure TPortAudioSoundDevice.EnsureIoBuf(ANeeded: Integer);
+{ 伸ばすだけ。縮めないのは、ブロック長が変動しても確保が再発しないようにするため。 }
+begin
+  if Length(FIoBuf) < ANeeded then
+    SetLength(FIoBuf, ANeeded);
 end;
 
 function TPortAudioSoundDevice.BeginIo(out AStream: PPaStream): Boolean;
@@ -411,6 +437,9 @@ begin
     finally
       FLock.Leave;
     end;
+    { X-04: 想定ブロック長ぶんを先に確保し、以後の入出力で確保が
+      走らないようにする。足りなければ EnsureIoBuf が伸ばす。 }
+    EnsureIoBuf(DEFAULT_IO_FRAMES * Channels);
     Result := True;
   finally
     FLifecycleLock.Leave;
@@ -511,7 +540,6 @@ function TPortAudioSoundDevice.ReadSamples(var Buf: array of Double;
   多チャネル入力からは先頭チャネル (ch0) を取り出してモノラルとして返す。
   AUD-05: Count の範囲検査も行う。 }
 var
-  FBuf: array of Single;
   i, ch: Integer;
   ErrCode: PaError;
   h: PPaStream;
@@ -522,16 +550,16 @@ begin
   try
     ch := Channels;
     if ch < 1 then ch := 1;
-    SetLength(FBuf, Count * ch);
+    EnsureIoBuf(Count * ch);   // X-04: 通常は既に足りていて何もしない
 
-    ErrCode := Pa_ReadStream(h, @FBuf[0], culong(Count));
+    ErrCode := Pa_ReadStream(h, @FIoBuf[0], culong(Count));
     // paInputOverflowed はデータ自体は取得できているため致命的エラーとしない
     // (fldigi: SoundPort::Read も同様に overflow を許容してログのみ出す)
     if (ErrCode <> paNoError) and (ErrCode <> paInputOverflowed) then
       raise EPortAudioError.Create(ErrCode, 'Pa_ReadStream');
 
     for i := 0 to Count - 1 do
-      Buf[i] := FBuf[i * ch];   // インターリーブの先頭チャネル
+      Buf[i] := FIoBuf[i * ch];   // インターリーブの先頭チャネル
     Result := Count;
   finally
     EndIo;
@@ -545,7 +573,6 @@ function TPortAudioSoundDevice.WriteSamples(const Buf: array of Double;
   インターリーブせず Count 個だけ渡していたため、再生内容が壊れていた。
   モノラル入力は全チャネルへ複製する。 }
 var
-  FBuf: array of Single;
   i, c, ch: Integer;
   ErrCode: PaError;
   h: PPaStream;
@@ -556,12 +583,12 @@ begin
   try
     ch := Channels;
     if ch < 1 then ch := 1;
-    SetLength(FBuf, Count * ch);
+    EnsureIoBuf(Count * ch);   // X-04
     for i := 0 to Count - 1 do
       for c := 0 to ch - 1 do
-        FBuf[i * ch + c] := Buf[i];
+        FIoBuf[i * ch + c] := Buf[i];
 
-    ErrCode := Pa_WriteStream(h, @FBuf[0], culong(Count));
+    ErrCode := Pa_WriteStream(h, @FIoBuf[0], culong(Count));
     if (ErrCode <> paNoError) and (ErrCode <> paOutputUnderflowed) then
       raise EPortAudioError.Create(ErrCode, 'Pa_WriteStream');
 
@@ -577,7 +604,6 @@ function TPortAudioSoundDevice.WriteStereo(const BufL, BufR: array of Double;
   モノラルで開いたストリームへ 2 倍のデータを渡すと壊れていた。
   両バッファの長さも検証する。 }
 var
-  FBuf: array of Single;
   i: Integer;
   ErrCode: PaError;
   h: PPaStream;
@@ -595,14 +621,14 @@ begin
   if not BeginIo(h) then Exit;
   try
     // インターリーブ (L,R,L,R,...) で書き込む
-    SetLength(FBuf, Count * 2);
+    EnsureIoBuf(Count * 2);   // X-04
     for i := 0 to Count - 1 do
     begin
-      FBuf[i * 2] := BufL[i];
-      FBuf[i * 2 + 1] := BufR[i];
+      FIoBuf[i * 2] := BufL[i];
+      FIoBuf[i * 2 + 1] := BufR[i];
     end;
 
-    ErrCode := Pa_WriteStream(h, @FBuf[0], culong(Count));
+    ErrCode := Pa_WriteStream(h, @FIoBuf[0], culong(Count));
     if (ErrCode <> paNoError) and (ErrCode <> paOutputUnderflowed) then
       raise EPortAudioError.Create(ErrCode, 'Pa_WriteStream (stereo)');
 

@@ -762,7 +762,6 @@ end;
 
 procedure TRttyModem.SendSymbol(ASymbol: Integer; ALen: Integer; ASoundOut: Boolean);
 var
-  Buf: array of Double;
   i: Integer;
   Freq: Double;
   Sym: Integer;
@@ -780,10 +779,10 @@ begin
 
   if ASoundOut and Assigned(Sound) then
   begin
-    SetLength(Buf, ALen);
+    EnsureTxBuf(ALen);   // X-04: 通常は既に足りていて何もしない
     for i := 0 to ALen - 1 do
-      Buf[i] := Nco(Freq);
-    Sound.WriteSamples(Buf, ALen);
+      FTxSymbolBuf[i] := Nco(Freq);
+    Sound.WriteSamples(FTxSymbolBuf, ALen);
   end
   else
     for i := 0 to ALen - 1 do

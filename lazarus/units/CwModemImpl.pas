@@ -774,7 +774,6 @@ end;
 
 procedure TCwModem.SendSymbol(ABit: Integer; ALen: Integer);
 var
-  Buf: array of Double;
   n: Integer;
   TxFreq: Double;
   Amp: Double;
@@ -787,7 +786,7 @@ begin
   if ALen <= 0 then
     Exit;
 
-  SetLength(Buf, ALen);
+  EnsureTxBuf(ALen);   // X-04: 通常は既に足りていて何もしない
   TxFreq := TxFrequency;
 
   if ABit = 1 then
@@ -799,17 +798,17 @@ begin
         Amp := Amp * FKeyShape[n];
       if (ALen - n) < FKNum then
         Amp := Amp * FKeyShape[ALen - n];
-      Buf[n] := Amp;
+      FTxSymbolBuf[n] := Amp;
     end;
   end
   else
   begin
     for n := 0 to ALen - 1 do
-      Buf[n] := 0;
+      FTxSymbolBuf[n] := 0;
   end;
 
   if Assigned(Sound) then
-    Sound.WriteSamples(Buf, ALen);
+    Sound.WriteSamples(FTxSymbolBuf, ALen);
 end;
 
 procedure TCwModem.SendCh(AChar: Integer);
