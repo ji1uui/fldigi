@@ -432,6 +432,20 @@ type
     function HandleTag(const ATagBody: string; ACtx: TMacroContext;
       var AResult: TMacroExpansion; ADepth: Integer;
       var APending: string): Boolean;
+
+    { --- 宣言的な条件分岐・反復 ---
+      いずれも "展開時に" 解決する。実行時に分岐するのではなく、
+      展開し終わった段階では条件の無い平坦な列になっている。
+      これが決定的に重要で、おかげで送信前バリデーションが
+      そのまま成立する (「今回実際に送られるもの」を検査できる)。
+      スクリプト言語を埋め込むとこの性質が失われる。 }
+    function EvalCondition(const ACond: string; ACtx: TMacroContext;
+      var AResult: TMacroExpansion; out AValue: Boolean): Boolean;
+    { AStartPos (開きタグの直後) から対応する閉じタグを探す。
+      AElsePos は IF のときだけ意味を持つ (無ければ 0)。 }
+    function FindBlockEnd(const AText: string; AStartPos: Integer;
+      AIsIf: Boolean; var AResult: TMacroExpansion;
+      out AElsePos, AEndPos, AAfterPos: Integer): Boolean;
   public
     constructor Create(AMacros: TMacroSet = nil);
 
@@ -631,6 +645,11 @@ function FormatSerial(AValue, ADigits: Integer): string;
   数字以外はそのまま通す。 }
 function ToCutNumbers(const AText: string): string;
 
+{ 「値を差し込むだけ」のタグ名から値を引く。展開と条件式が共用する。
+  戻り値: 既知のタグだったか。 }
+function MacroValueByName(const ATagName: string; ACtx: TMacroContext;
+  out AValue: string): Boolean;
+
 function MacroCategoryToStr(ACategory: TMacroCategory): string;
 function StrToMacroCategory(const AStr: string): TMacroCategory;
 function MacroIssueLevelToStr(ALevel: TMacroIssueLevel): string;
@@ -649,6 +668,10 @@ const
   MACRO_JSON_VERSION = 1;
   DEFAULT_SERIAL_DIGITS = 3;
   DEFAULT_MAX_DEPTH = 8;
+  { <REPEAT:n> の上限。展開時に n 回ぶん実体化するので、
+    大きな値を許すとメモリと送信時間の両方が破裂する。
+    CQ を数回繰り返す用途しか想定していない。 }
+  MAX_REPEAT_COUNT = 20;
 
 { ============================ 補助関数 ============================ }
 
@@ -798,6 +821,64 @@ begin
   else
     Result := '相手なし';
   end;
+end;
+
+function MacroValueByName(const ATagName: string; ACtx: TMacroContext;
+  out AValue: string): Boolean;
+{ 「値を差し込むだけ」のタグの表。展開 (<CALL> 等) と
+  条件式 (HAS:CALL / EMPTY:CALL) の両方がここを見るので、
+  片方にだけ項目を足して食い違う、ということが起きない。 }
+var
+  n: string;
+begin
+  Result := True;
+  AValue := '';
+  n := UpperCase(Trim(ATagName));
+
+  { --- 自局 --- }
+  if n = 'MYCALL' then AValue := ACtx.MyCall
+  else if n = 'MYNAME' then AValue := ACtx.MyName
+  else if n = 'MYQTH' then AValue := ACtx.MyQth
+  else if n = 'MYLOC' then AValue := ACtx.MyLocator
+  else if n = 'MYRIG' then AValue := ACtx.MyRig
+  else if (n = 'MYANT') or (n = 'ANTENNA') then AValue := ACtx.MyAntenna
+  else if n = 'MYPWR' then
+  begin
+    if ACtx.MyPowerW > 0 then
+      AValue := IntToStr(ACtx.MyPowerW);
+  end
+
+  { --- 相手局 --- }
+  else if n = 'CALL' then AValue := ACtx.Call
+  else if n = 'NAME' then AValue := ACtx.Name
+  else if n = 'QTH' then AValue := ACtx.Qth
+  else if n = 'LOC' then AValue := ACtx.Locator
+  else if (n = 'RST') or (n = 'RSTS') then AValue := ACtx.RstSent
+  else if n = 'RSTR' then AValue := ACtx.RstRcvd
+
+  { --- 運用状態 --- }
+  else if n = 'BAND' then AValue := ACtx.Band
+
+  { --- 日時 (すべて UTC。ログも交信も UTC で扱うため) --- }
+  else if n = 'TIME' then
+    AValue := FormatDateTime('hhnn', ACtx.UtcNow) + 'Z'
+  else if n = 'DATE' then
+    AValue := FormatDateTime('yyyymmdd', ACtx.UtcNow)
+  else if n = 'ZDT' then
+    AValue := FormatDateTime('yyyy-mm-dd hh:nn', ACtx.UtcNow) + 'Z'
+
+  { --- コンテスト --- }
+  else if n = 'CNTST' then AValue := ACtx.ContestName
+  else if (n = '#') or (n = 'SERIAL') then
+    AValue := FormatSerial(ACtx.SerialOut, ACtx.SerialDigits)
+  else if (n = '#CUT') or (n = 'SERIALCUT') then
+    AValue := ToCutNumbers(FormatSerial(ACtx.SerialOut, ACtx.SerialDigits))
+  else if n = 'SERIALIN' then AValue := ACtx.SerialIn
+  else if n = 'XOUT' then AValue := ACtx.ExchangeOut
+  else if n = 'XIN' then AValue := ACtx.ExchangeIn
+
+  else
+    Result := False;
 end;
 
 { ============================ TMacroExpansion ============================ }
@@ -1362,6 +1443,21 @@ end;
 
 { ============================ TMacroExpander ============================ }
 
+function FindWordOp(const AText, AOp: string; out APos: Integer): Boolean;
+{ 空白で囲まれた語形の演算子を探す (' GT ' 等)。 }
+begin
+  APos := Pos(AOp, AText);
+  Result := APos > 0;
+end;
+
+function SetTrue(out ATarget: Boolean; AValue: Boolean): Boolean;
+{ 「条件は読めた (True) / 値は AValue」を 1 行で返すためだけの補助。 }
+begin
+  ATarget := AValue;
+  Result := True;
+end;
+
+
 constructor TMacroExpander.Create(AMacros: TMacroSet);
 begin
   inherited Create;
@@ -1446,6 +1542,7 @@ var
   num: Double;
   sub: TMacroDefinition;
   fs: TFormatSettings;
+  value: string;
 begin
   Result := True;
   upperTag := UpperCase(Trim(ATagBody));
@@ -1466,31 +1563,13 @@ begin
 
   ATagName := tagName;
 
-  { --- 自局 --- }
-  if tagName = 'MYCALL' then APending := APending + ACtx.MyCall
-  else if tagName = 'MYNAME' then APending := APending + ACtx.MyName
-  else if tagName = 'MYQTH' then APending := APending + ACtx.MyQth
-  else if tagName = 'MYLOC' then APending := APending + ACtx.MyLocator
-  else if tagName = 'MYRIG' then APending := APending + ACtx.MyRig
-  else if (tagName = 'MYANT') or (tagName = 'ANTENNA') then
-    APending := APending + ACtx.MyAntenna
-  else if tagName = 'MYPWR' then
-  begin
-    if ACtx.MyPowerW > 0 then
-      APending := APending + IntToStr(ACtx.MyPowerW);
-  end
-
-  { --- 相手局 --- }
-  else if tagName = 'CALL' then APending := APending + ACtx.Call
-  else if tagName = 'NAME' then APending := APending + ACtx.Name
-  else if tagName = 'QTH' then APending := APending + ACtx.Qth
-  else if tagName = 'LOC' then APending := APending + ACtx.Locator
-  else if (tagName = 'RST') or (tagName = 'RSTS') then
-    APending := APending + ACtx.RstSent
-  else if tagName = 'RSTR' then APending := APending + ACtx.RstRcvd
+  { --- 値を差し込むだけのタグは 1 か所にまとめてある。
+        条件式の HAS:/EMPTY: が同じ表を参照するので、
+        ここで分岐を書き足すと条件式にも自動的に効く。 --- }
+  if MacroValueByName(tagName, ACtx, value) then
+    APending := APending + value
 
   { --- 運用状態 --- }
-  else if tagName = 'BAND' then APending := APending + ACtx.Band
   else if tagName = 'MODE' then
   begin
     if arg = '' then
@@ -1520,25 +1599,7 @@ begin
     end;
   end
 
-  { --- 日時 (すべて UTC。ログも交信も UTC で扱うため) --- }
-  else if tagName = 'TIME' then
-    APending := APending + FormatDateTime('hhnn', ACtx.UtcNow) + 'Z'
-  else if tagName = 'DATE' then
-    APending := APending + FormatDateTime('yyyymmdd', ACtx.UtcNow)
-  else if tagName = 'ZDT' then
-    APending := APending +
-      FormatDateTime('yyyy-mm-dd hh:nn', ACtx.UtcNow) + 'Z'
-
-  { --- コンテスト --- }
-  else if tagName = 'CNTST' then APending := APending + ACtx.ContestName
-  else if (tagName = '#') or (tagName = 'SERIAL') then
-    APending := APending + FormatSerial(ACtx.SerialOut, ACtx.SerialDigits)
-  else if (tagName = '#CUT') or (tagName = 'SERIALCUT') then
-    APending := APending +
-      ToCutNumbers(FormatSerial(ACtx.SerialOut, ACtx.SerialDigits))
-  else if tagName = 'SERIALIN' then APending := APending + ACtx.SerialIn
-  else if tagName = 'XOUT' then APending := APending + ACtx.ExchangeOut
-  else if tagName = 'XIN' then APending := APending + ACtx.ExchangeIn
+  { --- コンテスト (操作系のみ。値は上の表で処理される) --- }
   else if tagName = 'INCR' then AddAction(AResult, APending, makIncSerial, '', 0)
   else if tagName = 'DECR' then AddAction(AResult, APending, makDecSerial, '', 0)
 
@@ -1597,11 +1658,248 @@ begin
     Result := False;   // 未知のタグ
 end;
 
+function TMacroExpander.EvalCondition(const ACond: string;
+  ACtx: TMacroContext; var AResult: TMacroExpansion;
+  out AValue: Boolean): Boolean;
+{ 条件は「列挙できる形」に限定してある。任意の式を書けるようにすると
+  静的に検査できなくなり、送信前バリデーションが意味を失うため。
+
+    DUPE / NOTDUPE          既に交信済みか
+    CONTEST / NOTCONTEST    コンテスト運用か (ContestName が入っているか)
+    ROLE=RUN | ROLE=SP      立場
+    PHASE=<局面> / PHASE>=<局面>
+    MODE=CW / MODE NE CW    モード (大小を区別しない)
+    BAND=20m / BAND NE 20m
+    HAS:<タグ名>            値タグが空でない
+    EMPTY:<タグ名>          値タグが空
+    SERIAL=n / SERIAL GT n / SERIAL LT n / SERIAL NE n
+
+  比較演算子に > < <> を使わないのは、タグの終端 '>' と衝突するためである。
+  <IF:SERIAL>100> と書くと最初の '>' でタグが閉じてしまう。
+  そこで GT / LT / GE / NE という語形にしてある
+  (= だけは衝突しないのでそのまま使える)。 }
+var
+  c, lhs, rhs, op: string;
+  p, n: Integer;
+  v: string;
+
+  function Cmp(const AL, AR: string): Boolean;
+  begin
+    Result := UpperCase(Trim(AL)) = UpperCase(Trim(AR));
+  end;
+
+begin
+  Result := True;
+  AValue := False;
+  c := UpperCase(Trim(ACond));
+  if c = '' then
+  begin
+    AddIssue(AResult, milError, 'IF', '条件が空です');
+    Exit(False);
+  end;
+
+  { --- 引数を取らない条件 --- }
+  if c = 'DUPE' then Exit(SetTrue(AValue, ACtx.IsDuplicate));
+  if c = 'NOTDUPE' then Exit(SetTrue(AValue, not ACtx.IsDuplicate));
+  if c = 'CONTEST' then Exit(SetTrue(AValue, Trim(ACtx.ContestName) <> ''));
+  if c = 'NOTCONTEST' then Exit(SetTrue(AValue, Trim(ACtx.ContestName) = ''));
+
+  { --- HAS: / EMPTY: --- }
+  if Copy(c, 1, 4) = 'HAS:' then
+  begin
+    if not MacroValueByName(Copy(c, 5, MaxInt), ACtx, v) then
+    begin
+      AddIssue(AResult, milError, 'IF',
+        'HAS: に指定されたタグが不明です: ' + Copy(c, 5, MaxInt));
+      Exit(False);
+    end;
+    Exit(SetTrue(AValue, Trim(v) <> ''));
+  end;
+  if Copy(c, 1, 6) = 'EMPTY:' then
+  begin
+    if not MacroValueByName(Copy(c, 7, MaxInt), ACtx, v) then
+    begin
+      AddIssue(AResult, milError, 'IF',
+        'EMPTY: に指定されたタグが不明です: ' + Copy(c, 7, MaxInt));
+      Exit(False);
+    end;
+    Exit(SetTrue(AValue, Trim(v) = ''));
+  end;
+
+  { --- 比較演算 ---
+    語形の演算子を先に探す (空白で区切られていることを要求するので、
+    値の中にたまたま GT 等が含まれていても誤検出しない)。 }
+  op := '';
+  p := 0;
+  if FindWordOp(c, ' GE ', p) then op := 'GE'
+  else if FindWordOp(c, ' GT ', p) then op := 'GT'
+  else if FindWordOp(c, ' LT ', p) then op := 'LT'
+  else if FindWordOp(c, ' NE ', p) then op := 'NE'
+  else if FindWordOp(c, ' EQ ', p) then op := 'EQ'
+  else
+  begin
+    p := Pos('=', c);
+    if p > 0 then op := '=';
+  end;
+
+  if op = '' then
+  begin
+    AddIssue(AResult, milError, 'IF', '条件の書き方が分かりません: ' + ACond);
+    Exit(False);
+  end;
+
+  if op = '=' then
+  begin
+    lhs := Trim(Copy(c, 1, p - 1));
+    rhs := Trim(Copy(c, p + 1, MaxInt));
+  end
+  else
+  begin
+    lhs := Trim(Copy(c, 1, p - 1));
+    rhs := Trim(Copy(c, p + 4, MaxInt));   { ' XX ' の 4 文字分 }
+    if op = 'EQ' then op := '=';
+  end;
+
+  if lhs = 'ROLE' then
+  begin
+    if (rhs = 'RUN') then Exit(SetTrue(AValue, ACtx.Role = qrRun));
+    if (rhs = 'SP') or (rhs = 'SEARCHPOUNCE') then
+      Exit(SetTrue(AValue, ACtx.Role = qrSearchPounce));
+    AddIssue(AResult, milError, 'IF', '立場の指定が不明です: ' + rhs);
+    Exit(False);
+  end;
+
+  if lhs = 'PHASE' then
+  begin
+    if op = '=' then Exit(SetTrue(AValue, ACtx.Phase = StrToQsoPhase(rhs)));
+    if op = 'GE' then Exit(SetTrue(AValue, ACtx.Phase >= StrToQsoPhase(rhs)));
+    AddIssue(AResult, milError, 'IF',
+      '局面の比較は = と GE のみ使えます');
+    Exit(False);
+  end;
+
+  if lhs = 'SERIAL' then
+  begin
+    if not TryStrToInt(rhs, n) then
+    begin
+      AddIssue(AResult, milError, 'IF', '数値として読めません: ' + rhs);
+      Exit(False);
+    end;
+    if op = '=' then Exit(SetTrue(AValue, ACtx.SerialOut = n));
+    if op = 'GT' then Exit(SetTrue(AValue, ACtx.SerialOut > n));
+    if op = 'GE' then Exit(SetTrue(AValue, ACtx.SerialOut >= n));
+    if op = 'LT' then Exit(SetTrue(AValue, ACtx.SerialOut < n));
+    if op = 'NE' then Exit(SetTrue(AValue, ACtx.SerialOut <> n));
+    AddIssue(AResult, milError, 'IF', '送信ナンバーの比較演算が不正です');
+    Exit(False);
+  end;
+
+  { それ以外は値タグとの文字列比較 (MODE / BAND / CALL など) }
+  if MacroValueByName(lhs, ACtx, v) then
+  begin
+    if op = '=' then Exit(SetTrue(AValue, Cmp(v, rhs)));
+    if op = 'NE' then Exit(SetTrue(AValue, not Cmp(v, rhs)));
+    AddIssue(AResult, milError, 'IF',
+      '文字列の比較に使えるのは = と NE だけです: ' + ACond);
+    Exit(False);
+  end;
+
+  { MODE は値表にあるが、引数つき操作タグでもあるので個別に見る }
+  if lhs = 'MODE' then
+  begin
+    if op = '=' then Exit(SetTrue(AValue, Cmp(ACtx.Mode, rhs)));
+    if op = 'NE' then Exit(SetTrue(AValue, not Cmp(ACtx.Mode, rhs)));
+  end;
+
+  AddIssue(AResult, milError, 'IF', '条件の左辺が不明です: ' + lhs);
+  Result := False;
+end;
+
+function TMacroExpander.FindBlockEnd(const AText: string; AStartPos: Integer;
+  AIsIf: Boolean; var AResult: TMacroExpansion;
+  out AElsePos, AEndPos, AAfterPos: Integer): Boolean;
+{ 開きタグの直後 (AStartPos) から、同じ入れ子段の閉じタグを探す。
+  入れ子の種類を積んで確認するので、<IF><REPEAT><ENDIF><ENDREPEAT> の
+  ような交差した書き方も検出できる (黙って通すと展開結果が
+  書いた人の意図と食い違う)。 }
+var
+  i, gt: Integer;
+  body, nm: string;
+  stack: array of Boolean;   // True = IF, False = REPEAT
+  top: Integer;
+begin
+  Result := False;
+  AElsePos := 0;
+  AEndPos := 0;
+  AAfterPos := 0;
+  SetLength(stack, 0);
+  top := 0;
+  i := AStartPos;
+
+  while i <= Length(AText) do
+  begin
+    if AText[i] <> '<' then
+    begin
+      Inc(i);
+      Continue;
+    end;
+    gt := PosEx('>', AText, i + 1);
+    if gt = 0 then Break;
+    body := Copy(AText, i + 1, gt - i - 1);
+    nm := UpperCase(Trim(body));
+    if Pos(':', nm) > 0 then
+      nm := Copy(nm, 1, Pos(':', nm) - 1);
+
+    if (nm = 'IF') or (nm = 'REPEAT') then
+    begin
+      SetLength(stack, top + 1);
+      stack[top] := nm = 'IF';
+      Inc(top);
+    end
+    else if nm = 'ELSE' then
+    begin
+      if (top = 0) and AIsIf and (AElsePos = 0) then
+        AElsePos := i;
+    end
+    else if (nm = 'ENDIF') or (nm = 'ENDREPEAT') then
+    begin
+      if top = 0 then
+      begin
+        if AIsIf <> (nm = 'ENDIF') then
+        begin
+          AddIssue(AResult, milError, nm,
+            'ブロックの開きと閉じが対応していません');
+          Exit(False);
+        end;
+        AEndPos := i;
+        AAfterPos := gt + 1;
+        Exit(True);
+      end;
+      Dec(top);
+      if stack[top] <> (nm = 'ENDIF') then
+      begin
+        AddIssue(AResult, milError, nm,
+          'ブロックが交差しています (<IF> と <REPEAT> の入れ子を確認してください)');
+        Exit(False);
+      end;
+      SetLength(stack, top);
+    end;
+    i := gt + 1;
+  end;
+
+  if AIsIf then
+    AddIssue(AResult, milError, 'IF', '対応する <ENDIF> がありません')
+  else
+    AddIssue(AResult, milError, 'REPEAT', '対応する <ENDREPEAT> がありません');
+end;
+
 procedure TMacroExpander.ExpandInto(const AText: string; ACtx: TMacroContext;
   var AResult: TMacroExpansion; ADepth: Integer; var APending: string);
 var
   i, gtPos: Integer;
-  body: string;
+  body, tagName, tagArg, branch: string;
+  elsePos, endPos, afterPos, elseGt, repeatCount, rep: Integer;
+  condValue: Boolean;
 begin
   i := 1;
   while i <= Length(AText) do
@@ -1623,6 +1921,83 @@ begin
     end;
 
     body := Copy(AText, i + 1, gtPos - i - 1);
+    tagName := UpperCase(Trim(body));
+    if Pos(':', tagName) > 0 then
+    begin
+      tagArg := Trim(Copy(Trim(body), Pos(':', tagName) + 1, MaxInt));
+      tagName := Copy(tagName, 1, Pos(':', tagName) - 1);
+    end
+    else
+      tagArg := '';
+
+    { --- 条件分岐 (展開時に解決する) --- }
+    if tagName = 'IF' then
+    begin
+      if not FindBlockEnd(AText, gtPos + 1, True, AResult,
+                          elsePos, endPos, afterPos) then Exit;
+      if not EvalCondition(tagArg, ACtx, AResult, condValue) then
+      begin
+        { 条件が読めない場合は「何も出さない」。誤った文面を送るより
+          送らない方が安全であり、Issue で理由が残る。 }
+        i := afterPos;
+        Continue;
+      end;
+      if elsePos > 0 then
+      begin
+        if condValue then
+          branch := Copy(AText, gtPos + 1, elsePos - gtPos - 1)
+        else
+        begin
+          elseGt := PosEx('>', AText, elsePos + 1);
+          if elseGt = 0 then elseGt := elsePos;
+          branch := Copy(AText, elseGt + 1, endPos - elseGt - 1);
+        end;
+      end
+      else if condValue then
+        branch := Copy(AText, gtPos + 1, endPos - gtPos - 1)
+      else
+        branch := '';
+      if branch <> '' then
+        ExpandInto(branch, ACtx, AResult, ADepth, APending);
+      i := afterPos;
+      Continue;
+    end;
+
+    { --- 反復 (展開時に展開しきる) --- }
+    if tagName = 'REPEAT' then
+    begin
+      if not FindBlockEnd(AText, gtPos + 1, False, AResult,
+                          elsePos, endPos, afterPos) then Exit;
+      if not TryStrToInt(tagArg, repeatCount) then
+      begin
+        AddIssue(AResult, milError, 'REPEAT',
+          '繰り返し回数として読めません: ' + tagArg);
+        i := afterPos;
+        Continue;
+      end;
+      if (repeatCount < 0) or (repeatCount > MAX_REPEAT_COUNT) then
+      begin
+        AddIssue(AResult, milError, 'REPEAT',
+          '繰り返し回数が範囲外です (0～' + IntToStr(MAX_REPEAT_COUNT) +
+          '): ' + tagArg);
+        i := afterPos;
+        Continue;
+      end;
+      branch := Copy(AText, gtPos + 1, endPos - gtPos - 1);
+      for rep := 1 to repeatCount do
+        ExpandInto(branch, ACtx, AResult, ADepth, APending);
+      i := afterPos;
+      Continue;
+    end;
+
+    { ブロックの外に現れた閉じタグ }
+    if (tagName = 'ELSE') or (tagName = 'ENDIF') or (tagName = 'ENDREPEAT') then
+    begin
+      AddIssue(AResult, milError, tagName,
+        '対応する開きタグがありません');
+      i := gtPos + 1;
+      Continue;
+    end;
 
     { 文字列側は溜めておき、操作が入る直前で切り出す。
       こうすると「文字列 → 操作 → 文字列」の順序が保たれる。 }
