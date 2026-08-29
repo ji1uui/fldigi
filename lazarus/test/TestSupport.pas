@@ -15,14 +15,35 @@
 unit TestSupport;
 
 {$mode objfpc}{$H+}
+{$modeswitch advancedrecords}
 
 interface
 
 uses
+  {$IFDEF UNIX} BaseUnix, {$ENDIF}
+  {$IFDEF WINDOWS} Windows, {$ENDIF}
   Classes, SysUtils, Math, SoundIntf, ModemTypes, Modem, DecodeEvidence;
 
 type
   TDoubleArray = array of Double;
+
+  { --- ブロック処理時間の統計 ---
+    v1.1 Z-04 Deterministic Realtime の判定に使う。
+    平均 CPU 使用率ではなく「1ブロックの最悪処理時間」を見るのは、
+    音声が途切れる原因が平均負荷ではなく deadline 超過だからである。
+    平均が 1% でも、たまに 100ms かかるなら underrun する。 }
+  TBlockTiming = record
+    Count: Integer;
+    MeanMs: Double;
+    MaxMs: Double;
+    P99Ms: Double;
+    { 1ブロックが表す音声の長さ (ミリ秒)。これを超えたら deadline 超過。 }
+    DeadlineMs: Double;
+    function MeanRatio: Double;   // 平均 / deadline
+    function MaxRatio: Double;    // 最悪 / deadline
+    function P99Ratio: Double;
+    function Describe: string;
+  end;
 
   TCaptureSoundDevice = class(TCustomSoundDevice)
   private
@@ -83,7 +104,119 @@ type
     property LastDecoder: string read FLastDecoder;
   end;
 
+{ 単調増加の高分解能時刻 (秒)。
+  1ブロックは 0.5ms 程度なので GetTickCount64 (ミリ秒) では粒度が足りない。 }
+function HiResSeconds: Double;
+
+{ 測定値の配列から統計を作る (AMs は各ブロックの処理時間[ms])。 }
+function SummarizeBlockTiming(const AMs: array of Double;
+  ADeadlineMs: Double): TBlockTiming;
+
 implementation
+
+{$IFDEF UNIX}
+type
+  Ttimespec_ = record
+    tv_sec: clong;
+    tv_nsec: clong;
+  end;
+function clock_gettime_(clk: cint; var tp: Ttimespec_): cint; cdecl;
+  external 'c' name 'clock_gettime';
+const
+  CLOCK_MONOTONIC_ = 1;
+{$ENDIF}
+
+function HiResSeconds: Double;
+{$IFDEF UNIX}
+var
+  ts: Ttimespec_;
+begin
+  if clock_gettime_(CLOCK_MONOTONIC_, ts) = 0 then
+    Result := ts.tv_sec + ts.tv_nsec / 1.0e9
+  else
+    Result := Now * 86400.0;
+end;
+{$ELSE}
+{$IFDEF WINDOWS}
+var
+  f, c: Int64;
+begin
+  if QueryPerformanceFrequency(f) and (f <> 0) and QueryPerformanceCounter(c) then
+    Result := c / f
+  else
+    Result := Now * 86400.0;
+end;
+{$ELSE}
+begin
+  Result := Now * 86400.0;
+end;
+{$ENDIF}
+{$ENDIF}
+
+function TBlockTiming.MeanRatio: Double;
+begin
+  if DeadlineMs > 0 then Result := MeanMs / DeadlineMs else Result := 0;
+end;
+
+function TBlockTiming.MaxRatio: Double;
+begin
+  if DeadlineMs > 0 then Result := MaxMs / DeadlineMs else Result := 0;
+end;
+
+function TBlockTiming.P99Ratio: Double;
+begin
+  if DeadlineMs > 0 then Result := P99Ms / DeadlineMs else Result := 0;
+end;
+
+function TBlockTiming.Describe: string;
+begin
+  Result := Format(
+    '%d ブロック / deadline %.2f ms | 平均 %.3f ms (%.2f%%) ' +
+    'p99 %.3f ms (%.2f%%) 最悪 %.3f ms (%.2f%%)',
+    [Count, DeadlineMs, MeanMs, 100 * MeanRatio,
+     P99Ms, 100 * P99Ratio, MaxMs, 100 * MaxRatio]);
+end;
+
+function SummarizeBlockTiming(const AMs: array of Double;
+  ADeadlineMs: Double): TBlockTiming;
+var
+  sorted: TDoubleArray;
+  i, j, idx: Integer;
+  tmp, sum: Double;
+begin
+  Result.Count := Length(AMs);
+  Result.DeadlineMs := ADeadlineMs;
+  Result.MeanMs := 0;
+  Result.MaxMs := 0;
+  Result.P99Ms := 0;
+  if Result.Count = 0 then Exit;
+
+  SetLength(sorted, Length(AMs));
+  sum := 0;
+  for i := 0 to High(AMs) do
+  begin
+    sorted[i] := AMs[i];
+    sum := sum + AMs[i];
+  end;
+  Result.MeanMs := sum / Length(AMs);
+
+  { 件数が多くないので単純な挿入ソートで十分 }
+  for i := 1 to High(sorted) do
+  begin
+    tmp := sorted[i];
+    j := i - 1;
+    while (j >= 0) and (sorted[j] > tmp) do
+    begin
+      sorted[j + 1] := sorted[j];
+      Dec(j);
+    end;
+    sorted[j + 1] := tmp;
+  end;
+  Result.MaxMs := sorted[High(sorted)];
+  idx := Trunc(0.99 * High(sorted));
+  if idx < 0 then idx := 0;
+  Result.P99Ms := sorted[idx];
+end;
 
 constructor TCaptureSoundDevice.Create;
 begin
@@ -146,6 +279,7 @@ function TCaptureSoundDevice.GetCapturedCopy: TDoubleArray;
 var
   i: Integer;
 begin
+  Result := nil;
   SetLength(Result, FCount);
   for i := 0 to FCount - 1 do
     Result[i] := FCaptured[i];

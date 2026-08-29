@@ -34,6 +34,25 @@ uses
   RttyModemImpl, CwModemImpl, TestSupport;
 
 const
+  { --- deadline に対する判定しきい値 (v1.1 Z-04) ---
+    判定を平均 CPU 使用率ではなく「1ブロックの処理時間」に置くのは、
+    音声が途切れる原因が平均負荷ではなく deadline 超過だからである。
+    平均が 1% でも、たまに 100ms かかれば underrun する。
+
+    実測 (このコンテナ, 3000ブロック x 3回):
+      RTTY 平均 1.1〜1.2% / p99 1.2〜1.7% / 最悪 1.8〜4.7%
+      CW   平均 0.54%     / p99 1.07%     / 最悪 1.32%
+
+    最悪値だけは実行ごとに 3 倍近くばらつく (OS のスケジューラに
+    割り込まれるため)。そこで
+      - 平均と p99 は安定するので厳しめに (8〜9倍の余裕)
+      - 最悪値はスケジューラ由来の外れ値を許すため緩めに (10倍の余裕)
+    という置き方にする。緩くても「20倍遅くなった」は捕まえられる。 }
+  MAX_MEAN_RATIO = 0.10;   // 平均は deadline の 10% 未満
+  MAX_P99_RATIO  = 0.15;   // p99 は 15% 未満
+  MAX_PEAK_RATIO = 0.50;   // 最悪でも 50% 未満 (絶対に落とさない側の保険)
+
+const
   { 送信 1 回ぶんの測定で許す確保回数。送信量に比例して増えないことを
     見るための上限であり、絶対値そのものに意味はない。 }
   MAX_TX_ALLOC = 20;
@@ -319,8 +338,82 @@ begin
   Check(alloc >= 50, '確保を実際に検出できている (測定が空振りしていない)');
 end;
 
+procedure MeasureRxDeadline(const AName: string; AModem: TCustomModem;
+  AFreqHz: Double);
+{ 受信ブロックの処理時間を測り、deadline に対する余裕を判定する。 }
+const
+  BLK = 512;
+  SR = 8000;
+  WARMUP = 200;
+  SAMPLES = 2000;
+var
+  buf: array[0..BLK - 1] of Double;
+  ms: TDoubleArray;
+  i, k: Integer;
+  t0: Double;
+  st: TBlockTiming;
 begin
-  WriteLn('=== X-04 realtime 経路の動的確保 検証 ===');
+  WriteLn;
+  WriteLn('--- ', AName, ' 受信ブロックの deadline 余裕 ---');
+  ms := nil;
+  SetLength(ms, SAMPLES);
+  for i := 0 to BLK - 1 do
+    buf[i] := 0.3 * Sin(2 * Pi * AFreqHz * i / SR) + 0.05 * Sin(i * 0.7);
+
+  AModem.RxInit;
+  { フィルタ生成などの初回コストを測定から外す }
+  for k := 1 to WARMUP do
+    AModem.RxProcess(buf, BLK);
+
+  for k := 0 to SAMPLES - 1 do
+  begin
+    t0 := HiResSeconds;
+    AModem.RxProcess(buf, BLK);
+    ms[k] := (HiResSeconds - t0) * 1000;
+  end;
+
+  st := SummarizeBlockTiming(ms, 1000.0 * BLK / SR);
+  WriteLn('  ', st.Describe);
+
+  Check(st.MeanRatio < MAX_MEAN_RATIO, Format(
+    '平均が deadline の %.0f%% 未満 (実際 %.2f%%)',
+    [100 * MAX_MEAN_RATIO, 100 * st.MeanRatio]));
+  Check(st.P99Ratio < MAX_P99_RATIO, Format(
+    'p99 が deadline の %.0f%% 未満 (実際 %.2f%%)',
+    [100 * MAX_P99_RATIO, 100 * st.P99Ratio]));
+  Check(st.MaxRatio < MAX_PEAK_RATIO, Format(
+    '最悪でも deadline の %.0f%% 未満 (実際 %.2f%%)',
+    [100 * MAX_PEAK_RATIO, 100 * st.MaxRatio]));
+end;
+
+procedure TestRxDeadlineMargin;
+var
+  snd: TCaptureSoundDevice;
+  rx: TRttyModem;
+  cw: TCwModem;
+begin
+  snd := TCaptureSoundDevice.Create;
+  rx := TRttyModem.Create(snd);
+  try
+    rx.Frequency := 1000;
+    rx.AfcOn := True;
+    MeasureRxDeadline('RTTY', rx, 1000);
+  finally
+    rx.Free;
+  end;
+
+  cw := TCwModem.Create(snd);
+  try
+    cw.Frequency := 700;
+    MeasureRxDeadline('CW', cw, 700);
+  finally
+    cw.Free;
+    snd.Free;
+  end;
+end;
+
+begin
+  WriteLn('=== X-04 / Z-04 realtime 特性の検証 ===');
   InstallCountingMM;
   try
     TestMeasurementItselfWorks;
@@ -331,6 +424,10 @@ begin
   finally
     RestoreMM;
   end;
+
+  { 時間の測定は、計数用メモリマネージャを外してから行う
+    (計数のオーバーヘッドが測定値に乗らないようにするため)。 }
+  TestRxDeadlineMargin;
 
   WriteLn;
   WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 (全 ', TestCount, ' 件中) ===');

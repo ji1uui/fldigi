@@ -117,6 +117,16 @@ type
 
     FRxState: TRttyRxState;  // fldigi: rxstate
     FRxMode: Integer;        // fldigi: rxmode (LETTERS/FIGURES)
+    { Unshift On Space。fldigi は progdefaults の全体設定だったが、
+      本移植版ではインスタンスごとに持つ。理由は2つある。
+        (1) 送信用と受信用に別インスタンスを持つ設計なので、全体設定だと
+            片方の変更がもう片方にも及んでしまう (実際に不具合だった)。
+        (2) 設定違いの復調器を同じ音声に対して並列評価する
+            (v1.1 C-06) には、設定がインスタンスに閉じている必要がある。
+      「状態をインスタンスに閉じ込める」規律は、並列化を後回しにしても
+      後から入れられる形を保つための対価である (ADR-009)。 }
+    FUosTx: Boolean;
+    FUosRx: Boolean;
     FShiftState: Integer;    // fldigi: shift_state (送信用)
     FCounter: Integer;       // fldigi: counter
     FBitCntr: Integer;       // fldigi: bitcntr
@@ -192,6 +202,9 @@ type
     property Shift: Double read FShift;
     property Baud: Double read FBaud;
     property AfcOn: Boolean read FAfcOn write FAfcOn;
+    { 設定がインスタンスに閉じていることを外から確かめられるようにする。 }
+    property UnshiftOnSpaceTx: Boolean read FUosTx write SetUnshiftOnSpaceTx;
+    property UnshiftOnSpaceRx: Boolean read FUosRx write SetUnshiftOnSpaceRx;
   end;
 
 implementation
@@ -218,10 +231,6 @@ const
     '5', '"', ')', '2', '#', '6', '0', '1',
     '9', '?', '&', ' ', '.', '/', ';', ' '
   );
-
-var
-  UOSTx: Boolean = True;  // fldigi: progdefaults.UOStx
-  UOSRx: Boolean = True;  // fldigi: progdefaults.UOSrx
 
 { ---- パリティ計算 (fldigi: static int rparity() / int rttyparity()) ---- }
 
@@ -270,6 +279,9 @@ begin
   FBits := 5;
   FParity := rpNone;
   FStopBits := 1.5;
+  { fldigi の progdefaults 既定値 (UOStx/UOSrx = true) と同じ }
+  FUosTx := True;
+  FUosRx := True;
 
   FMarkFilt := TFftFilt.Create(RttyFiltLenTable[FBaudIndex]);
   FSpaceFilt := TFftFilt.Create(RttyFiltLenTable[FBaudIndex]);
@@ -401,12 +413,12 @@ end;
 
 procedure TRttyModem.SetUnshiftOnSpaceTx(AOn: Boolean);
 begin
-  UOSTx := AOn;
+  FUosTx := AOn;
 end;
 
 procedure TRttyModem.SetUnshiftOnSpaceRx(AOn: Boolean);
 begin
-  UOSRx := AOn;
+  FUosRx := AOn;
 end;
 
 { ---- 受信 DSP ---- }
@@ -838,7 +850,7 @@ begin
     $1B: FRxMode := RTTY_FIGURES;
     $04:
       begin
-        if UOSRx then
+        if FUosRx then
           FRxMode := RTTY_LETTERS;
         Exit(' ');
       end;
@@ -967,7 +979,7 @@ begin
   // unshift-on-space
   if C = Ord(' ') then
   begin
-    if UOSTx then
+    if FUosTx then
     begin
       SendChar(RTTY_LETTERS);
       SendChar($04);

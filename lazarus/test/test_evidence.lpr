@@ -185,6 +185,47 @@ begin
   end;
 end;
 
+procedure TestModemStateIsPerInstance;
+{ ADR-009: 状態をインスタンスに閉じ込める規律の検査。
+
+  並列化を後回しにできるのは「後から入れられる形」を保っている場合だけで、
+  その条件が「同じ音声を設定違いの複数インスタンスへ流せる」ことである。
+  ユニットレベルのグローバルが1つでもあると、その時点で C-06
+  (複数 Decoder の並列評価) ができなくなる。
+
+  UOS (Unshift On Space) は fldigi では progdefaults の全体設定だったため
+  そのまま移植していたが、送信用と受信用のインスタンスが設定を共有して
+  しまう不具合になっていた。 }
+var
+  snd: TNullSoundDevice;
+  a, b: TRttyModem;
+begin
+  WriteLn;
+  WriteLn('--- 5. モデムの設定がインスタンスに閉じているか ---');
+  snd := TNullSoundDevice.Create;
+  a := TRttyModem.Create(snd);
+  b := TRttyModem.Create(snd);
+  try
+    Check(a.UnshiftOnSpaceRx, '既定は有効 (fldigi の progdefaults と同じ)');
+    Check(b.UnshiftOnSpaceRx, '2つ目のインスタンスも既定は有効');
+
+    a.UnshiftOnSpaceRx := False;
+    Check(not a.UnshiftOnSpaceRx, '片方の設定が変わる');
+    Check(b.UnshiftOnSpaceRx,
+      'もう片方は影響を受けない (設定がインスタンスに閉じている)');
+
+    a.UnshiftOnSpaceTx := False;
+    Check(b.UnshiftOnSpaceTx, '送信側の設定も独立している');
+
+    { 設定違いの2本が同じ音声を処理できること = C-06 の前提 }
+    a.RxInit;
+    b.RxInit;
+    Check(True, '設定違いの2インスタンスを同時に初期化できる');
+  finally
+    b.Free; a.Free; snd.Free;
+  end;
+end;
+
 procedure TestCwIsHonestAboutNoMetric;
 { CW は文字ごとの軟判定尺度を持たない。持っていないものを
   でっち上げていないこと (根拠のない尺度が Evidence に流れると、
@@ -195,7 +236,7 @@ var
   ev: TDecodeEvidence;
 begin
   WriteLn;
-  WriteLn('--- 4. CW は持っていない尺度を作らない ---');
+  WriteLn('--- 6. CW は持っていない尺度を作らない ---');
   snd := TNullSoundDevice.Create;
   m := TCwModem.Create(snd);
   try
@@ -217,6 +258,7 @@ begin
   TestEvidenceType;
   TestRttyEmitsEvidence;
   TestSpeculativeDecodeHasNoSideEffect;
+  TestModemStateIsPerInstance;
   TestCwIsHonestAboutNoMetric;
 
   WriteLn;
