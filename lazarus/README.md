@@ -39,6 +39,7 @@ lazarus/
 │   ├── AppConfig.pas             PC固有設定(接続軸)・セッション状態
 │   ├── DecodeEvidence.pas        復調結果と根拠 (ADR-002 / Phase 0 Core interface)
 │   ├── EventBus.pas              Control Plane 専用の通知路 (ADR-001 / §12)
+│   ├── Observability.pas         観測 (ADR-010 / Z-01): 出来事の記録と数値の統計
 │   ├── MacroEngine.pas           ラバースタンプ/コンテスト用マクロ (fldigi: macros.cxx)
 │   ├── RxExtract.pas             受信テキストからのコール/RST/ナンバー抽出
 │   └── SafeFileIO.pas            原子的なファイル保存・生バイト読込の共通ヘルパー
@@ -63,7 +64,8 @@ lazarus/
     ├── test_rxextract.lpr    受信抽出/宣言的条件分岐のテスト
     ├── test_evidence.lpr     ADR-002 Modem API (Evidence) のテスト
     ├── test_realtime.lpr     X-04 realtime 経路の動的確保の検証
-    └── test_eventbus.lpr     ADR-001 / §12 Event Bus のテスト
+    ├── test_eventbus.lpr     ADR-001 / §12 Event Bus のテスト
+    └── test_observability.lpr Z-01 Observability のテスト
 ```
 
 ## 1. モデムエンジン設計 (`TCustomModem` / `TModemEngine`)
@@ -2580,5 +2582,88 @@ UI-01 で「周波数は意図的に合流させる」と書いた判断が、�
 | Plugin API draft / Capability Model | 未着手 |
 | Logging data model (Rich Internal Model ↔ ADIF Adapter) | 未着手 |
 | Observability (Z-01) の記録経路 | 未着手 |
+| ADR-003 L6 privacy/encryption 方針 | 未着手 |
+| §18 要求トレーサビリティ | 未着手 |
+
+
+## 18. Z-01 Observability
+
+決定は `docs/adr/ADR-010-observability.md`。
+
+### 二つの目的は要求する形が違う
+
+v1.1 は Z-01 の目的を「障害診断とアルゴリズム改善の二つ」と書いている。
+必要な形が違うので、記録を 2 種類に分けた。
+
+| 目的 | 必要な形 | 実装 |
+|---|---|---|
+| 障害診断 | 出来事の列。順序と時刻 | `TObsLog` (有界リング) |
+| アルゴリズム改善 | 数値の分布 | `TObsMetric` (件数/最小/最大/平均/分布/予算超過) |
+
+一方に寄せると他方が使えない。SNR を出来事として 1 件ずつ残すとリングが
+すぐ埋まり、逆に障害を統計にすると「何がどの順で起きたか」が消える。
+
+### 記録は確保しない
+
+記録は音声スレッドから起きる。観測のために deadline を落としては本末転倒
+なので (ADR-009)、固定長レコード・固定長の発生元名・生成時確保のリングに
+した。メモリマネージャを差し替えて実測している。
+
+```
+出来事 2000 件の記録: 確保 0 回
+統計 2000 件の記録  : 確保 0 回
+```
+
+ロックは使うが、メモリマネージャのロックが realtime で問題なのは
+「保持時間が長い」からではなく**確保の作業量が有界でない**からであり、
+数命令で抜けるロックは性質が違う。
+
+### 記録経路は Event Bus への購読 1 つ
+
+`TObsBusRecorder` はバスを購読して記録するだけで、**発行元 (モデム・
+エンジン・リグ) には一切手を入れていない**。ADR-001 でバスを Control Plane
+の通り道にしたので、購読を足せば経路が立つ。
+
+### 捨てられていた情報を通した
+
+実装中に、記録すべきなのに捨てられていた情報が 2 つ見つかった。
+
+**PortAudio の overflow / underflow。** 「データは取れているから致命的では
+ない」として黙って握り潰していた。黙って捨てると**「復調がときどき化けるが
+原因が分からない」**という最も困る状態になる。回数を残せば、音が悪いのか
+設定が悪いのかを切り分けられる。
+
+**Evidence の SNR と復調戦略名。** `ModemUI` がバスへ発行するとき SNR を 0 に、
+発行元を自分の名前 (`'ModemUI'`) にしていた。Phase 3 で複数戦略を並列評価
+したとき、記録から戦略を区別できなければ「どの戦略が良いか」を測れない。
+
+後者は**バスへ直接発行するテストでは気づけなかった**。実経路
+(モデム → ModemUI → バス → 記録) を通すテストを足して初めて捕まった。
+
+### エンジンのブロック処理時間は注入型
+
+`BlockMetric` を設定したときだけ測る。設定しなければ時刻取得すらしない。
+観測のために DSP 層が診断機構を知る必要はないし、観測が既定で有効だと
+「測っているせいで遅い」という疑いを常に抱えることになる。
+
+### 検証
+
+`test/test_observability.lpr` は 59 件。反証で確認した項目:
+
+| 戻した修正 | 落ちるテスト |
+|---|---|
+| 記録に確保を混ぜる | 出来事の記録で一切確保しない |
+| SNR と戦略名を落とす | 復調戦略名が最後まで届く / SNR が最後まで届く (計4件) |
+
+全16スイート 895 件成功。
+
+### Phase 0 の残り
+
+| 項目 | 状態 |
+|---|---|
+| ADR-002 / X-04 / ADR-001 / ADR-009 / ModemUI 移行 / ADR-010 | 完了 |
+| Test framework | 着手 (TestSupport.pas) |
+| Logging data model (Rich Internal Model ↔ ADIF Adapter) | 未着手 |
+| Plugin API draft / Capability Model | 未着手 |
 | ADR-003 L6 privacy/encryption 方針 | 未着手 |
 | §18 要求トレーサビリティ | 未着手 |

@@ -333,11 +333,16 @@ begin
       ならず (ADR-001)、受信文字ごとに確保が走ると X-04 にも反する。
       最有力候補と尺度の要約だけを運ぶ。補正候補の提示が要る Phase 4 で、
       候補列を別経路 (Evidence Store への参照) で渡す形に拡張する。 }
+    { Z-01: SNR と復調戦略名は、アルゴリズム改善のための材料になる。
+      Evidence が持っているのにここで落としていたので通す。
+      発行元は UI ではなく「どの戦略が出したか」にする ―
+      Phase 3 で複数戦略を並列評価したとき、記録から戦略を
+      区別できる必要がある。 }
     FBus.PublishNumeric(bekDecodedSymbol,
       AEvidence.BestChar, Ord(AEvidence.MetricKind),
       AEvidence.BestMetric,
-      0,
-      UI_SOURCE,
+      AEvidence.SnrDb,
+      AEvidence.DecoderName,
       AEvidence.CandidateCount - 1);
   finally
     LeaveCallback;

@@ -15,7 +15,7 @@ cd "$(dirname "$0")"
 
 SUITES="test_contestlog test_fftfilt test_filter_switch test_opprofile \
 test_robustness test_rtty_cw test_station_adif test_adif_full \
-test_modem test_threadsafety test_macro test_rxextract test_evidence test_realtime test_eventbus"
+test_modem test_threadsafety test_macro test_rxextract test_evidence test_realtime test_eventbus test_observability"
 
 # 外部ライブラリを要するスイート (未導入の環境ではリンクできない)
 OPTIONAL_SUITES="test_rigcontrol test_portaudio"

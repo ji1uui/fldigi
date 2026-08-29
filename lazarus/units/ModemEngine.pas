@@ -33,7 +33,7 @@ unit ModemEngine;
 interface
 
 uses
-  Classes, SysUtils, SyncObjs, SoundIntf, ModemTypes, Modem;
+  Classes, SysUtils, SyncObjs, SoundIntf, ModemTypes, Modem, Observability;
 
 const
   { fldigi: SCBLOCKSIZE (sound.h) -- 1回のRead/Writeで扱うサンプル数 }
@@ -80,6 +80,12 @@ type
 
     FStarted: Boolean;        // Start が呼ばれたか (WaitFor 可否の判定用)
     FExiting: Boolean;        // RequestExit 済み (冪等化のため)
+
+    { Z-01/Z-04: 1ブロックの復調にかかった時間を積む先。
+      nil なら何も測らない (既定)。エンジンが Observability に
+      依存しないよう、外から注入する形にしている ―
+      観測のために DSP 層が診断機構を知る必要はない。 }
+    FBlockMetric: TObsMetric;
 
     function GetState: TTrxState;
     function GetActiveModem: TCustomModem;
@@ -144,6 +150,11 @@ type
       コード部とデータ部の2ワードあり代入がアトミックではないため、
       読み書きの両方をロックで守る (片方だけでは "コードは旧・データは nil" の
       ちぎれた値を読みうる)。 }
+    { Z-01/Z-04: 設定すると 1 ブロックの復調時間をここへ積む。
+      Budget に deadline を入れておけば「何回落としたか」が分かる。
+      nil なら測らない (既定)。 }
+    property BlockMetric: TObsMetric read FBlockMetric write FBlockMetric;
+
     property OnStateChanged: TEngineStateEvent read GetOnStateChanged write SetOnStateChanged;
     property OnError: TEngineErrorEvent read GetOnError write SetOnError;
   end;
@@ -484,6 +495,8 @@ end;
 procedure TModemEngine.RxLoopStep;
 var
   NRead, Res: Integer;
+  t0: Double;
+  measuring: Boolean;
 begin
   { デバイスが未オープン/未設定のときは例外を投げずに待機する。
     そうしないと「まだ開いていない」という正常な過渡状態のたびに
@@ -499,6 +512,11 @@ begin
     Sleep(1);
     Exit;
   end;
+  { Z-04: 復調にかかった時間を測る。測らない設定なら時刻取得もしない
+    (観測のために realtime 経路へ余計な仕事を足さない)。 }
+  measuring := Assigned(FBlockMetric);
+  if measuring then
+    t0 := ObsHiResSeconds;
   try
     Res := FActiveModem.RxProcess(FRxBuf, NRead);
     if Res < 0 then
@@ -507,6 +525,8 @@ begin
     on E: Exception do
       DoError('RxProcess exception: ' + E.Message);
   end;
+  if measuring then
+    FBlockMetric.Observe((ObsHiResSeconds - t0) * 1000);
 end;
 
 procedure TModemEngine.TxLoopStep;

@@ -110,6 +110,14 @@ type
       その方向の入出力は単一スレッドから行う。エンジンは RX 用と TX 用の
       デバイスを別インスタンスで持つ設計なので、この前提は満たされる。 }
     FIoBuf: array of Single;
+    { Z-01: 入力の取りこぼしと出力の音切れの回数。
+      これまでは「データは取れているから致命的ではない」として黙って
+      握り潰していたが、黙って捨てると
+        「復調がときどき化けるが原因が分からない」
+      という最も困る状態になる。回数を残せば、音が悪いのか設定が悪いのかを
+      切り分けられる。数えるだけなので realtime 経路でも確保は起きない。 }
+    FOverflowCount: Int64;
+    FUnderflowCount: Int64;
     procedure EnsureIoBuf(ANeeded: Integer);
     procedure DoClose;
     function FindDeviceIndex(const ANamePart: string; ANeedInput: Boolean): PaDeviceIndex;
@@ -141,6 +149,10 @@ type
     property DeviceName: string read FDeviceName write FDeviceName;
     property LatencySec: Double read FLatencySec write FLatencySec;
     property ResolvedDeviceIndex: PaDeviceIndex read FResolvedDeviceIndex;
+    { Z-01: 入力バッファ溢れ (取りこぼし) の累計。0 が正常。 }
+    property OverflowCount: Int64 read FOverflowCount;
+    { Z-01: 出力バッファ枯渇 (音切れ) の累計。0 が正常。 }
+    property UnderflowCount: Int64 read FUnderflowCount;
   end;
 
 { PortAudio ライブラリ全体の初期化/終了。通常はアプリ起動時に一度
@@ -241,6 +253,8 @@ begin
   FLifecycleLock := TCriticalSection.Create;
   FIoActive := 0;
   FClosing := False;
+  FOverflowCount := 0;
+  FUnderflowCount := 0;
   PaRefAcquire;
 end;
 
@@ -555,6 +569,9 @@ begin
     ErrCode := Pa_ReadStream(h, @FIoBuf[0], culong(Count));
     // paInputOverflowed はデータ自体は取得できているため致命的エラーとしない
     // (fldigi: SoundPort::Read も同様に overflow を許容してログのみ出す)
+    // ただし黙って捨てず回数を残す (Z-01)。
+    if ErrCode = paInputOverflowed then
+      Inc(FOverflowCount);
     if (ErrCode <> paNoError) and (ErrCode <> paInputOverflowed) then
       raise EPortAudioError.Create(ErrCode, 'Pa_ReadStream');
 
@@ -589,6 +606,8 @@ begin
         FIoBuf[i * ch + c] := Buf[i];
 
     ErrCode := Pa_WriteStream(h, @FIoBuf[0], culong(Count));
+    if ErrCode = paOutputUnderflowed then
+      Inc(FUnderflowCount);   // Z-01: 音切れの回数を残す
     if (ErrCode <> paNoError) and (ErrCode <> paOutputUnderflowed) then
       raise EPortAudioError.Create(ErrCode, 'Pa_WriteStream');
 
@@ -629,6 +648,8 @@ begin
     end;
 
     ErrCode := Pa_WriteStream(h, @FIoBuf[0], culong(Count));
+    if ErrCode = paOutputUnderflowed then
+      Inc(FUnderflowCount);   // Z-01
     if (ErrCode <> paNoError) and (ErrCode <> paOutputUnderflowed) then
       raise EPortAudioError.Create(ErrCode, 'Pa_WriteStream (stereo)');
 

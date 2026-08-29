@@ -20,9 +20,8 @@ unit TestSupport;
 interface
 
 uses
-  {$IFDEF UNIX} BaseUnix, {$ENDIF}
-  {$IFDEF WINDOWS} Windows, {$ENDIF}
-  Classes, SysUtils, Math, SoundIntf, ModemTypes, Modem, DecodeEvidence;
+  Classes, SysUtils, Math, SoundIntf, ModemTypes, Modem, DecodeEvidence,
+  Observability;
 
 type
   TDoubleArray = array of Double;
@@ -114,44 +113,12 @@ function SummarizeBlockTiming(const AMs: array of Double;
 
 implementation
 
-{$IFDEF UNIX}
-type
-  Ttimespec_ = record
-    tv_sec: clong;
-    tv_nsec: clong;
-  end;
-function clock_gettime_(clk: cint; var tp: Ttimespec_): cint; cdecl;
-  external 'c' name 'clock_gettime';
-const
-  CLOCK_MONOTONIC_ = 1;
-{$ENDIF}
-
+{ 高分解能時刻は製品側 (Observability) の実装を使う。
+  テストが独自に持つと、測っているものが製品と違う可能性が残る。 }
 function HiResSeconds: Double;
-{$IFDEF UNIX}
-var
-  ts: Ttimespec_;
 begin
-  if clock_gettime_(CLOCK_MONOTONIC_, ts) = 0 then
-    Result := ts.tv_sec + ts.tv_nsec / 1.0e9
-  else
-    Result := Now * 86400.0;
+  Result := ObsHiResSeconds;
 end;
-{$ELSE}
-{$IFDEF WINDOWS}
-var
-  f, c: Int64;
-begin
-  if QueryPerformanceFrequency(f) and (f <> 0) and QueryPerformanceCounter(c) then
-    Result := c / f
-  else
-    Result := Now * 86400.0;
-end;
-{$ELSE}
-begin
-  Result := Now * 86400.0;
-end;
-{$ENDIF}
-{$ENDIF}
 
 function TBlockTiming.MeanRatio: Double;
 begin
