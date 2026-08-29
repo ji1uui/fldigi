@@ -31,7 +31,7 @@ interface
 uses
   Classes, SysUtils, SyncObjs,
   Forms, Controls, StdCtrls, ComCtrls, ExtCtrls, Dialogs,
-  SoundIntf, ModemTypes, Modem, ModemEngine, ModemUI, NullModemImpl;
+  SoundIntf, ModemTypes, Modem, ModemEngine, ModemUI, DecodeEvidence, NullModemImpl;
 
 type
 
@@ -65,7 +65,8 @@ type
     procedure HandleFrequencyChanged(Sender: TModemUI; AFrequency: Double);
     procedure HandleMetricChanged(Sender: TModemUI; AMetric: Double);
     procedure HandleStatusText(Sender: TModemUI; const AText: string);
-    procedure HandleRxChar(Sender: TModemUI; ACh: Integer);
+    procedure HandleRxChar(Sender: TModemUI; ACh: Integer;
+      AMetricKind: TEvidenceMetricKind; AMetric: Double; AAltCount: Integer);
     procedure HandleStateChanged(Sender: TModemUI; AState: TTrxState);
     procedure HandleError(Sender: TModemUI; const AMsg: string);
 
@@ -226,7 +227,8 @@ begin
   StatusBar1.SimpleText := AText;
 end;
 
-procedure TMainForm.HandleRxChar(Sender: TModemUI; ACh: Integer);
+procedure TMainForm.HandleRxChar(Sender: TModemUI; ACh: Integer;
+  AMetricKind: TEvidenceMetricKind; AMetric: Double; AAltCount: Integer);
 begin
   // fldigi: put_rx_char(unsigned int data) に相当。
   // 受信復調された1文字をテキスト表示に追記する。

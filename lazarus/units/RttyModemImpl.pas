@@ -41,7 +41,8 @@ unit RttyModemImpl;
 interface
 
 uses
-  Classes, SysUtils, Math, SoundIntf, ModemTypes, Modem, ModemDSP;
+  Classes, SysUtils, Math, SoundIntf, ModemTypes, Modem, ModemDSP,
+  DecodeEvidence;
 
 const
   RTTY_SAMPLE_RATE = 8000;      // fldigi: #define RTTY_SampleRate 8000
@@ -98,6 +99,17 @@ type
     FMarkFilt: TFftFilt;     // fldigi: fftfilt *mark_filt
     FSpaceFilt: TFftFilt;    // fldigi: fftfilt *space_filt
     FBitBuf: array[0..RTTY_MAXBITS-1] of Boolean; // fldigi: bit_buf[MAXBITS]
+    { ADR-002: 軟判定の余裕を運ぶための追加状態。
+      ATC 判定変数 V3 の符号がビット値、大きさが「判定境界からの距離」に
+      あたる。包絡線エネルギーで正規化すると -1..+1 の無次元量になり、
+      0 に近いほど「どちらとも言えない」ビットである。
+      これを文字組み立ての間ずっと保持しておき、最も弱かったビットを
+      反転した文字を第2候補として出す。 }
+    FMarginBuf: array[0..RTTY_MAXBITS-1] of Double;  // FBitBuf と同期して流す
+    FLastMargin: Double;                 // 直近サンプルの正規化余裕
+    FDataMargin: array[0..RTTY_MAXBITS-1] of Double; // データビットごとの余裕
+    FLastSnrDb: Double;                  // 直近に算出した SNR (Evidence 用)
+    FSamplePos: Int64;                   // Open からの通算サンプル数 (Replay 用)
     FMarkEnv, FMarkNoise: Double;  // fldigi: mark_env, mark_noise
     FSpaceEnv, FSpaceNoise: Double;// fldigi: space_env, space_noise
     FNoiseFloor: Double;          // fldigi: noise_floor
@@ -129,6 +141,15 @@ type
 
     function Mixer(var APhase: Double; AFreq: Double; const AIn: TComplex): TComplex;
     function DecodeChar: Integer;
+    { ADR-002: 復調した文字を Evidence として送り出す。
+      軟判定の余裕から「文字全体の確からしさ」と「第2候補」を作る。
+      文字の確からしさは、その文字を構成したデータビットのうち
+      最も余裕が小さかったものが決める (弱いビットが1つでもあれば
+      文字全体が危うい)。第2候補は、その最も弱いビットを反転した文字。
+      これは Phase 4 の Context Assistance が「補正候補」として使う。 }
+    procedure EmitDecodedChar(ACh: Integer);
+    { 副作用を残さない仮復号 (第2候補の算出用)。 }
+    function SpeculativeDecode(AData: Integer): Integer;
     function IsMark: Boolean;
     function IsMarkSpace(out ACorrection: Integer): Boolean;
     function RxBit(ABit: Boolean): Boolean; // fldigi: rtty::rx(bool bit)
@@ -174,6 +195,13 @@ type
   end;
 
 implementation
+
+
+const
+  { 第2候補を出す軟判定余裕のしきい値。
+    これより余裕がある (判定が明確な) 文字には候補を足さない。
+    足しても選ばれないうえ、Phase 4 の補正候補提示が雑音だらけになる。 }
+  ALT_CANDIDATE_MARGIN = 0.5;
 
 const
   { fldigi: static char letters[32] (rtty.cxx) }
@@ -434,6 +462,67 @@ begin
     Result := Data;
 end;
 
+function TRttyModem.SpeculativeDecode(AData: Integer): Integer;
+{ 「もしビットが違っていたら何の文字だったか」を試す仮復号。
+
+  BaudotDec は文字シフト/数字シフトの状態 (FRxMode) を書き換える。
+  仮復号でそれを動かしてしまうと、あり得たかもしれない候補の副作用で
+  本物のシフト状態が壊れ、以降の数字が文字として出てくる。
+  実際にこれで "12345" が "WERT" になった (Baudot では 2=W,3=E,4=R,5=T)。
+  仮の計算なので、状態は必ず元に戻す。 }
+var
+  savedMode, savedData: Integer;
+begin
+  savedMode := FRxMode;
+  savedData := FRxData;
+  try
+    FRxData := AData;
+    Result := DecodeChar;
+  finally
+    FRxData := savedData;
+    FRxMode := savedMode;
+  end;
+end;
+
+procedure TRttyModem.EmitDecodedChar(ACh: Integer);
+var
+  ev: TDecodeEvidence;
+  i, dataBits, altCh: Integer;
+  weakest: Integer;
+  weakestMargin: Double;
+begin
+  dataBits := FBits;
+  weakest := -1;
+  weakestMargin := 1.0;
+  for i := 0 to dataBits - 1 do
+    if FDataMargin[i] < weakestMargin then
+    begin
+      weakestMargin := FDataMargin[i];
+      weakest := i;
+    end;
+
+  ev := ScoredCandidateEvidence(ACh, weakestMargin, emkSoftMargin, DecoderName);
+  ev.HasSnr := True;
+  ev.SnrDb := FLastSnrDb;
+  ev.HasFreqOffset := True;
+  ev.FreqOffsetHz := FFreqErr;
+  ev.SamplePos := FSamplePos;
+
+  { 最も弱いビットを反転した文字を第2候補にする。
+    余裕が十分ある (= 判定が明確) ときは候補を増やさない。
+    増やしても選ばれないうえ、Phase 4 の補正候補提示が
+    雑音だらけになるため。 }
+  if (weakest >= 0) and (weakestMargin < ALT_CANDIDATE_MARGIN) then
+  begin
+    altCh := SpeculativeDecode(FRxData xor (1 shl weakest));
+    if (altCh <> 0) and (altCh <> ACh) then
+      { 第2候補の尺度は「反転してしまった側」なので符号を反転して渡す }
+      AddCandidate(ev, altCh, -weakestMargin);
+  end;
+
+  EmitDecode(ev);
+end;
+
 function TRttyModem.RxBit(ABit: Boolean): Boolean;
 var
   i, Correction, C: Integer;
@@ -443,8 +532,12 @@ begin
   Result := False;
 
   for i := 1 to FSymbolLen - 1 do
+  begin
     FBitBuf[i-1] := FBitBuf[i];
+    FMarginBuf[i-1] := FMarginBuf[i];
+  end;
   FBitBuf[FSymbolLen - 1] := ABit;
+  FMarginBuf[FSymbolLen - 1] := FLastMargin;
 
   case FRxState of
     rrsIdle:
@@ -465,6 +558,8 @@ begin
             FCounter := FSymbolLen;
             FBitCntr := 0;
             FRxData := 0;
+            for i := 0 to High(FDataMargin) do
+              FDataMargin[i] := 0;
           end
           else
             FRxState := rrsIdle;
@@ -482,6 +577,10 @@ begin
         begin
           if IsMark then
             FRxData := FRxData or (1 shl FBitCntr);
+          { このビットの判定余裕を記録する。IsMark と同じ位置
+            (シンボル中央) の値を使う。 }
+          if FBitCntr <= High(FDataMargin) then
+            FDataMargin[FBitCntr] := Abs(FMarginBuf[FSymbolLen div 2]);
           Inc(FBitCntr);
           FCounter := FSymbolLen;
         end;
@@ -505,7 +604,7 @@ begin
               else if (C = 10) and (FLastChar = 10) then
                 // 抑制
               else
-                EmitRxChar(C);
+                EmitDecodedChar(C);
               FLastChar := C;
             end;
             Result := True;
@@ -532,6 +631,7 @@ begin
     Snr := 10 * Log10(FSigPwr / FNoisePwr)
   else
     Snr := 0;
+  FLastSnrDb := Snr;   { Evidence へ載せるため保持する }
   SetMetric(ClampF(Snr * 5.0, 0.0, 100.0));
 end;
 
@@ -546,6 +646,7 @@ var
   Mp0, Mp1: Integer;
   Ferr: Double;
   AfcSpeedDiv: Integer;
+  MarginDenom: Double;
 begin
   MarkMag := CplxAbs(AZMark);
   FMarkEnv := DecayAvg(FMarkEnv, MarkMag, IfThen(MarkMag > FMarkEnv, FSymbolLen div 4, FSymbolLen * 16));
@@ -569,6 +670,14 @@ begin
 
   Bit := V3 > 0;
   FBit := Bit;
+
+  { 軟判定の余裕。V3 は「振幅の2乗」の次元なので、包絡線エネルギーで
+    割ると無次元になる。0 が判定境界、±1 が「完全に振り切った」状態。 }
+  MarginDenom := Sqr(FMarkEnv - FNoiseFloor) + Sqr(FSpaceEnv - FNoiseFloor);
+  if MarginDenom > 1e-12 then
+    FLastMargin := ClampF(V3 / MarginDenom, -1.0, 1.0)
+  else
+    FLastMargin := 0;
 
   FMarkHistory[FInpPtr] := AZMark;
   FSpaceHistory[FInpPtr] := AZSpace;
@@ -621,6 +730,8 @@ var
   MarkOut, SpaceOut: TComplexArray;
 begin
   ComputeMetric;
+  { Replay / 再現のために通算サンプル位置を進める (X-06 の下地)。 }
+  Inc(FSamplePos, ALen);
 
   for i := 0 to ALen - 1 do
   begin

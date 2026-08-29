@@ -59,7 +59,8 @@ unit CwModemImpl;
 interface
 
 uses
-  Classes, SysUtils, Math, SoundIntf, ModemTypes, Modem, ModemDSP, MorseTable;
+  Classes, SysUtils, Math, SoundIntf, ModemTypes, Modem, ModemDSP, MorseTable,
+  DecodeEvidence;
 
 const
   CW_SAMPLE_RATE = 8000;              // fldigi: #define CW_SAMPLERATE 8000
@@ -142,6 +143,8 @@ type
     // --- decode_stream 用の AGC / しきい値状態 ---
     FSigAvg: Double;                 // fldigi: sig_avg
     FNoiseFloor: Double;             // fldigi: noise_floor
+    FLastSnrDb: Double;   // 直近の SNR (Evidence 用)
+    FSamplePos: Int64;    // Open からの通算サンプル数 (Replay 用)
     FAgcPeak: Double;                // fldigi: agc_peak
     FCwUpper, FCwLower: Double;      // fldigi: progdefaults.CWupper/CWlower (ヒステリシス閾値)
     FSigLevel: Double;               // fldigi: siglevel
@@ -164,6 +167,8 @@ type
     procedure UpdateTracking(ADur1, ADur2: Int64);
     procedure DecodeStream(AValue: Double);
     function HandleEvent(AEvent: TCwEvent; out ASc: string): Boolean; // True=CW_SUCCESS
+    { ADR-002: 復号文字を Evidence として送り出す。 }
+    procedure EmitCwChar(ACh: Integer);
 
     function Nco(AFreq: Double): Double;
     procedure CreateEdges;
@@ -479,7 +484,10 @@ begin
   // fldigi: decode_stream() 内の metric 計算部分を分離
   M := 0.8 * Metric;
   if (FNoiseFloor > 1e-4) and (FNoiseFloor < FSigAvg) then
-    M := M + 0.2 * ClampF(2.5 * (20 * Log10(FSigAvg / FNoiseFloor)), 0, 100);
+  begin
+    FLastSnrDb := 20 * Log10(FSigAvg / FNoiseFloor);   { Evidence 用に保持 }
+    M := M + 0.2 * ClampF(2.5 * FLastSnrDb, 0, 100);
+  end;
   SetMetric(M);
 end;
 
@@ -546,8 +554,27 @@ begin
   if HandleEvent(ceQuery, Sc) then
   begin
     if Sc <> '' then
-      EmitRxChar(Ord(Sc[1]));
+      EmitCwChar(Ord(Sc[1]));
   end;
+end;
+
+procedure TCwModem.EmitCwChar(ACh: Integer);
+{ ADR-002: CW は文字ごとの軟判定尺度を持たない。
+  復号が「短点・長点の時間パターンをモールス表と照合する」方式で、
+  一致しなければ何も出さない (= 候補が1つか0つ) ためである。
+  候補に順位をつけるには、表の照合を「距離つきの近傍探索」に作り替える
+  必要があり、それは Phase 3 の Algorithm Portfolio の仕事になる。
+  ここで無理に数値をでっち上げると、根拠のない尺度が Evidence として
+  流れてしまうので、MetricKind は emkNone のままにする。
+  一方 SNR は持っているので、それは載せる。 }
+var
+  ev: TDecodeEvidence;
+begin
+  ev := SingleCandidateEvidence(ACh, DecoderName);
+  ev.HasSnr := True;
+  ev.SnrDb := FLastSnrDb;
+  ev.SamplePos := FSamplePos;
+  EmitDecode(ev);
 end;
 
 function TCwModem.HandleEvent(AEvent: TCwEvent; out ASc: string): Boolean;
@@ -672,6 +699,8 @@ var
   FiltOut: TComplexArray;
   Value: Double;
 begin
+  { Replay / 再現のために通算サンプル位置を進める (X-06 の下地)。 }
+  Inc(FSamplePos, ALen);
   // fldigi: reset_rx_filter() (CWmfilt="整合フィルタ"モードは未実装のため、
   // Bandwidth プロパティの変更のみを検出条件とする)
   if Bandwidth <> FFiltBandwidth then

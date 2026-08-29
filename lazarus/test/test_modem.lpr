@@ -18,7 +18,7 @@ uses
   cthreads,
   {$ENDIF}
   Classes, SysUtils,
-  SoundIntf, ModemTypes, Modem, ModemEngine, ModemUI, NullModemImpl;
+  SoundIntf, ModemTypes, Modem, ModemEngine, ModemUI, DecodeEvidence, NullModemImpl;
 
 type
   { テスト用の擬似フォーム。TModemUI からのイベントを受けて
@@ -37,7 +37,8 @@ type
     procedure OnFreq(Sender: TModemUI; AFrequency: Double);
     procedure OnMetric(Sender: TModemUI; AMetric: Double);
     procedure OnStatus(Sender: TModemUI; const AText: string);
-    procedure OnRxChar(Sender: TModemUI; ACh: Integer);
+    procedure OnRxChar(Sender: TModemUI; ACh: Integer;
+      AMetricKind: TEvidenceMetricKind; AMetric: Double; AAltCount: Integer);
     procedure OnState(Sender: TModemUI; AState: TTrxState);
     procedure OnError(Sender: TModemUI; const AMsg: string);
     function OnGetTxChar(Sender: TModemUI): Integer;
@@ -76,7 +77,8 @@ begin
   WriteLn('  [OK] OnStatus: ' + AText);
 end;
 
-procedure TFakeMainForm.OnRxChar(Sender: TModemUI; ACh: Integer);
+procedure TFakeMainForm.OnRxChar(Sender: TModemUI; ACh: Integer;
+  AMetricKind: TEvidenceMetricKind; AMetric: Double; AAltCount: Integer);
 begin
   WriteLn(Format('  [OK] OnRxChar: %d (%s)', [ACh, Chr(ACh)]));
 end;

@@ -18,6 +18,7 @@ test/test_threadsafety
 test/test_adif_full
 test/test_macro
 test/test_rxextract
+test/test_evidence
 forms/DemoModemApp
 *.res
 # SafeFileIO の一時ファイル (異常終了時のみ残りうる)

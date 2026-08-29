@@ -49,7 +49,7 @@ unit ModemUI;
 interface
 
 uses
-  Classes, SysUtils, SyncObjs, Modem, ModemEngine, ModemTypes;
+  Classes, SysUtils, SyncObjs, Modem, ModemEngine, ModemTypes, DecodeEvidence;
 
 type
   { FIFO に積むイベントの種別 (UI-01)。 }
@@ -59,6 +59,16 @@ type
     Kind: TUiEventKind;
     IntValue: Integer;   // uekRxChar: 文字コード / uekState: Ord(TTrxState)
     StrValue: string;    // uekStatus / uekError
+
+    { ADR-002 で復調結果が Evidence になったので、その要約もここで運ぶ。
+      候補の配列そのものは載せない ― 有界FIFOの要素は固定長にしておく
+      必要があり、要素ごとに動的配列を持たせると受信文字1字ごとに
+      確保が走る (X-04 の趣旨に反する)。
+      Phase 4 で補正候補の提示が要るようになった時点で、候補列を
+      別の経路 (Evidence Store への参照) で渡す形に拡張する。 }
+    MetricKind: TEvidenceMetricKind;
+    Metric: Double;      // 最有力候補の尺度
+    AltCount: Integer;   // 第2候補以降の件数
   end;
 
   TModemUI = class;
@@ -68,7 +78,12 @@ type
   TUIFrequencyEvent = procedure(Sender: TModemUI; AFrequency: Double) of object;
   TUIMetricEvent = procedure(Sender: TModemUI; AMetric: Double) of object;
   TUIStatusEvent = procedure(Sender: TModemUI; const AText: string) of object;
-  TUIRxCharEvent = procedure(Sender: TModemUI; ACh: Integer) of object;
+  { ADR-002: 尺度も一緒に渡す。Phase 4 の Confidence-aware GUI が
+    「低確信度の文字を強調する」ために必要になる。
+    AMetricKind が emkNone なら AMetric に意味は無い。 }
+  TUIRxCharEvent = procedure(Sender: TModemUI; ACh: Integer;
+    AMetricKind: TEvidenceMetricKind; AMetric: Double;
+    AAltCount: Integer) of object;
   TUIStateEvent = procedure(Sender: TModemUI; AState: TTrxState) of object;
   TUIErrorEvent = procedure(Sender: TModemUI; const AMsg: string) of object;
 
@@ -101,7 +116,8 @@ type
     procedure ModemFrequencyChanged(Sender: TCustomModem; AFrequency: Double);
     procedure ModemMetricChanged(Sender: TCustomModem; AMetric: Double);
     procedure ModemStatusText(Sender: TCustomModem; const AText: string);
-    procedure ModemPutRxChar(Sender: TCustomModem; ACh: Integer);
+    procedure ModemDecode(Sender: TCustomModem;
+      const AEvidence: TDecodeEvidence);
     function ModemGetTxChar(Sender: TCustomModem): Integer;
     procedure EngineStateChanged(Sender: TModemEngine; AState: TTrxState);
     procedure EngineError(Sender: TModemEngine; const AMsg: string);
@@ -165,6 +181,9 @@ type
       際にも利用する。ワーカースレッドから呼んで安全。 }
     procedure PushEvent(AKind: TUiEventKind; AIntValue: Integer;
       const AStrValue: string);
+
+    { 復調結果 (Evidence) を積む。最有力候補の文字と尺度の要約を運ぶ。 }
+    procedure PushDecode(const AEvidence: TDecodeEvidence);
 
     { モデム/エンジンを購読対象として登録する。
       fldigi でいう「active_modem に対して各種フックを仕込む」処理。
@@ -342,6 +361,41 @@ begin
       FQueue[idx].Kind := AKind;
       FQueue[idx].IntValue := AIntValue;
       FQueue[idx].StrValue := AStrValue;
+      FQueue[idx].MetricKind := emkNone;
+      FQueue[idx].Metric := 0;
+      FQueue[idx].AltCount := 0;
+      Inc(FQCount);
+      ScheduleDrain;
+    finally
+      FLock.Leave;
+    end;
+  finally
+    LeaveCallback;
+  end;
+end;
+
+procedure TModemUI.PushDecode(const AEvidence: TDecodeEvidence);
+var
+  idx: Integer;
+begin
+  if not EnterCallback then Exit;
+  try
+    FLock.Enter;
+    try
+      if FShuttingDown then Exit;
+      if FQCount >= Length(FQueue) then
+      begin
+        FQHead := (FQHead + 1) mod Length(FQueue);
+        Dec(FQCount);
+        Inc(FDropped);
+      end;
+      idx := (FQHead + FQCount) mod Length(FQueue);
+      FQueue[idx].Kind := uekRxChar;
+      FQueue[idx].IntValue := AEvidence.BestChar;
+      FQueue[idx].StrValue := '';
+      FQueue[idx].MetricKind := AEvidence.MetricKind;
+      FQueue[idx].Metric := AEvidence.BestMetric;
+      FQueue[idx].AltCount := AEvidence.CandidateCount - 1;
       Inc(FQCount);
       ScheduleDrain;
     finally
@@ -404,7 +458,8 @@ begin
 
     case ev.Kind of
       uekRxChar:
-        if Assigned(FOnRxChar) then FOnRxChar(Self, ev.IntValue);
+        if Assigned(FOnRxChar) then
+          FOnRxChar(Self, ev.IntValue, ev.MetricKind, ev.Metric, ev.AltCount);
       uekState:
         if Assigned(FOnStateChanged) then FOnStateChanged(Self, TTrxState(ev.IntValue));
       uekStatus:
@@ -424,7 +479,7 @@ begin
     FModem.OnFrequencyChanged := @ModemFrequencyChanged;
     FModem.OnMetricChanged := @ModemMetricChanged;
     FModem.OnStatusText := @ModemStatusText;
-    FModem.OnPutRxChar := @ModemPutRxChar;
+    FModem.OnDecode := @ModemDecode;
     FModem.OnGetTxChar := @ModemGetTxChar;
   end;
 end;
@@ -436,7 +491,7 @@ begin
     FModem.OnFrequencyChanged := nil;
     FModem.OnMetricChanged := nil;
     FModem.OnStatusText := nil;
-    FModem.OnPutRxChar := nil;
+    FModem.OnDecode := nil;
     FModem.OnGetTxChar := nil;
     FModem := nil;
   end;
@@ -509,11 +564,13 @@ begin
   PushEvent(uekStatus, 0, AText);
 end;
 
-procedure TModemUI.ModemPutRxChar(Sender: TCustomModem; ACh: Integer);
+procedure TModemUI.ModemDecode(Sender: TCustomModem;
+  const AEvidence: TDecodeEvidence);
 begin
-  // fldigi: put_rx_char(c) -- 復調文字を受信ウィンドウへ
+  // fldigi: put_rx_char(c) -- 復調結果を受信ウィンドウへ
   // 文字は 1 字も落とさず順序も守る必要があるため FIFO へ積む (UI-01)。
-  PushEvent(uekRxChar, ACh, '');
+  if AEvidence.CandidateCount = 0 then Exit;   // 候補なしは表示しない
+  PushDecode(AEvidence);
 end;
 
 function TModemUI.ModemGetTxChar(Sender: TCustomModem): Integer;

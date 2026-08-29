@@ -29,7 +29,7 @@ uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   Classes, SysUtils, SyncObjs,
   SoundIntf, ModemTypes, Modem, ModemEngine, ModemUI, NullModemImpl,
-  RigControlIntf, RigPollThread;
+  RigControlIntf, RigPollThread, DecodeEvidence;
 
 var
   FailCount: Integer = 0;
@@ -156,7 +156,8 @@ type
   public
     constructor Create;
     destructor Destroy; override;
-    procedure OnRxChar(Sender: TModemUI; ACh: Integer);
+    procedure OnRxChar(Sender: TModemUI; ACh: Integer;
+      AMetricKind: TEvidenceMetricKind; AMetric: Double; AAltCount: Integer);
     procedure OnState(Sender: TModemUI; AState: TTrxState);
     procedure OnError(Sender: TModemUI; const AMsg: string);
     property Chars: TStringList read FChars;
@@ -197,7 +198,8 @@ begin
   inherited Destroy;
 end;
 
-procedure TUiSink.OnRxChar(Sender: TModemUI; ACh: Integer);
+procedure TUiSink.OnRxChar(Sender: TModemUI; ACh: Integer;
+  AMetricKind: TEvidenceMetricKind; AMetric: Double; AAltCount: Integer);
 begin
   FChars.Add(IntToStr(ACh));
 end;

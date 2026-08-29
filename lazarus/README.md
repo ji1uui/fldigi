@@ -37,6 +37,7 @@ lazarus/
 │   ├── ContestLog.pas            コンテストロギング (fldigi: contest.cxx/counties.cxx)
 │   ├── OpProfile.pas             運用プロファイル (局/運用者/運用地/設備/形態の5軸)
 │   ├── AppConfig.pas             PC固有設定(接続軸)・セッション状態
+│   ├── DecodeEvidence.pas        復調結果と根拠 (ADR-002 / Phase 0 Core interface)
 │   ├── MacroEngine.pas           ラバースタンプ/コンテスト用マクロ (fldigi: macros.cxx)
 │   ├── RxExtract.pas             受信テキストからのコール/RST/ナンバー抽出
 │   └── SafeFileIO.pas            原子的なファイル保存・生バイト読込の共通ヘルパー
@@ -56,8 +57,10 @@ lazarus/
     ├── test_opprofile.lpr    運用プロファイル/PC固有設定の動作確認テスト
     ├── test_robustness.lpr   堅牢性・品質改善の回帰テスト
     ├── test_threadsafety.lpr 並行処理・音声・PTT の安全性回帰テスト
+    ├── TestSupport.pas       テスト共通部品 (Phase 0: Test framework)
     ├── test_macro.lpr        マクロ展開/送信前バリデーション/実行のテスト
-    └── test_rxextract.lpr    受信抽出/宣言的条件分岐のテスト
+    ├── test_rxextract.lpr    受信抽出/宣言的条件分岐のテスト
+    └── test_evidence.lpr     ADR-002 Modem API (Evidence) のテスト
 ```
 
 ## 1. モデムエンジン設計 (`TCustomModem` / `TModemEngine`)
@@ -2202,3 +2205,122 @@ RST の「直後が数字」が効くのは 599 以外のレポートである�
 - **`<XOUT>` は文字列をそのまま送るだけ**で、`ContestLog` の
   `TContestDefinition` が定める交換項目からの自動組み立てはしていない。
   コンテスト定義との連動は `ContestLog` 側の API を使う配線タスクになる。
+
+
+## 14. Phase 0 着手: ADR-002 (Modem API を Evidence 型にする)
+
+`Architecture & Requirements Baseline v1.1` に沿って Phase 0 に着手した。
+最初の対象は §19 の **ADR-002「Modem API は複数候補・Evidence・Confidence を
+将来返せる型にする」**。決定と根拠は `docs/adr/ADR-002-modem-api-evidence.md`
+に記録した。
+
+### なぜこれを最初にやるのか
+
+従来の出口は「確定した1文字」だった。
+
+```pascal
+procedure PutRxChar(ACh: Integer);
+```
+
+この形は第2候補も判断の根拠も戦略名も入力位置も**原理的に運べない**。
+v1.1 の Phase 4 (Confidence & Context) と第10章 (Confidence-aware GUI) は
+それら全部を前提にしているので、復調器が増えてから直すと全モデムの
+書き換えになる。**モデムが CW / RTTY の 2 つしかない今が最も安い。**
+
+### 何をしたか
+
+出口を `OnDecode` ひとつに統一し、`TDecodeEvidence` を運ぶようにした。
+
+```pascal
+TDecodeEvidence = record
+  Candidates: TDecodeCandidateArray;   // [0] が最有力
+  MetricKind: TEvidenceMetricKind;     // 尺度の種類
+  DecoderName: string;                 // どの戦略が出したか (Phase 3)
+  SamplePos: Int64;                    // 入力のどの位置か (Replay / X-06)
+  HasSnr, HasFreqOffset: Boolean; ...
+end;
+```
+
+**型を広げただけで中身が空なら Phase 4 は結局作れない**ので、既存モデムに
+実際の値を載せた。
+
+| モデム | 載せたもの |
+|---|---|
+| RTTY | 軟判定の余裕 (`-1..+1` 正規化)、第2候補、SNR、周波数誤差、サンプル位置 |
+| CW | SNR、サンプル位置のみ。**尺度は載せない** |
+
+RTTY の軟判定は ATC の判定変数 `V3` から作る。符号がビット値、大きさが
+判定境界からの距離にあたるので、包絡線エネルギーで割って無次元化する。
+文字の尺度は「構成したデータビットのうち最も余裕が小さいもの」、
+第2候補は「その最も弱いビットを反転した文字」。実測で 22 文字中 11 文字に
+第2候補が付いた。
+
+CW に尺度を載せないのは正直さの問題である。CW の復号は時間パターンを
+モールス表と照合する方式で、一致しなければ何も出さない。順位をつけるには
+照合を距離つき近傍探索に作り替える必要があり、それは Phase 3 の
+Algorithm Portfolio の仕事になる。**持っていない尺度をでっち上げると
+根拠のない値が Evidence として流れ、Phase 4 の校正が成り立たなくなる。**
+
+### Evidence と Confidence を区別する (§7 CF-01)
+
+この層が運ぶのは Evidence であって Confidence ではない。
+
+| | 内容 |
+|---|---|
+| Evidence | 復調器の内部尺度。モードごとに意味が違い、校正されていない |
+| Confidence | 表示用の校正済みの確からしさ。`P(correct｜c) ≈ c` |
+
+混同すると「Confidence 90%」と出しながら実際の正答率が 60% という、
+v1.1 が §10 と §17.1 で避けようとしている表示になる。校正は Phase 4 の
+責務とし、この層は生の Evidence を素直に運ぶ。
+
+同じ理由で、先に実装した `RxExtract` の「確信度」も Evidence 側の概念である
+(校正されていない発見的スコア)。Phase 4 で Confidence を導入する際に
+名前を整理する。
+
+### 作業中に踏んだ罠
+
+第2候補を作るために「ビットを反転したらどの文字か」を仮復号したところ、
+`BaudotDec` が文字/数字シフト状態を書き換えるため、**仮の計算の副作用で
+本物のシフト状態が壊れた**。`12345` が `WERT` になった
+(Baudot では 2=W, 3=E, 4=R, 5=T)。
+
+RTTY ループバックテストが即座に落ちたので気づけた。仮復号は状態を保存・
+復元する `SpeculativeDecode` に閉じ込め、回帰テストで固定した。
+
+### 併せて整えたもの (Phase 0: Test framework)
+
+テスト用の共通部品を `test/TestSupport.pas` に切り出した
+(`TCaptureSoundDevice` / `TTxSource` / `TEvidenceSink`)。
+復調器のテストは必ず「送信波形を作る → 復調させる → 結果を検査する」形に
+なるので、道具が各テストに散っていると道具側の差異で結果が食い違う。
+
+### 検証
+
+```bash
+./run_tests.sh
+```
+
+全13スイート 766 件成功。`test_evidence.lpr` (34件) の重点は
+**「型が運べること」ではなく「実際に運んでいること」**に置いた。
+
+| テスト | 内容 |
+|---|---|
+| 1 | Evidence 型の基本 (候補の順序、候補なし、診断表示) |
+| 2 | RTTY が実際に尺度・第2候補・SNR・位置を載せているか |
+| 3 | 仮復号がシフト状態を壊さないこと (上記の罠の回帰) |
+| 4 | CW が持っていない尺度をでっち上げていないこと |
+
+### Phase 0 の残り
+
+| 項目 | 状態 |
+|---|---|
+| ADR-002 Modem interface | **完了** |
+| Test framework | **着手** (TestSupport.pas) |
+| ADR-001 Data/Control Plane 境界・Event Bus | 未着手 |
+| X-04 realtime 経路の allocation 除去 | 未着手 |
+| Plugin API draft / Capability Model | 未着手 |
+| Logging data model (Rich Internal Model ↔ ADIF Adapter) | 未着手 |
+| Observability (Z-01) | 未着手 |
+| ADR-003 L6 privacy/encryption 方針 | 未着手 |
+| §18 要求トレーサビリティ (既存実装への REQ-ID 付与) | 未着手 |
