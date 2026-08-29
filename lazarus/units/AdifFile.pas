@@ -300,6 +300,12 @@ function BandNameFromFreqMHz(AFreqMHz: Double): string;
   該当バンドが無ければ空文字を返す。 }
 function BandFreqMHzFromName(const ABandName: string): string;
 
+{ ADIF のタグ名から TAdifFieldId の Ord() 値を求める。
+  見つからなければ -1 (= この構造体では持てないタグ)。
+  QsoAdifAdapter が「TAdifRecord へ写したときに落ちる項目」を数えるために
+  使う。落ちることを呼び出し側が知れるようにするための公開である。 }
+function FieldIdFromTag(const ATag: string): Integer;
+
 implementation
 
 { ============================================================================

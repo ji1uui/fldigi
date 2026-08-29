@@ -40,6 +40,8 @@ lazarus/
 │   ├── DecodeEvidence.pas        復調結果と根拠 (ADR-002 / Phase 0 Core interface)
 │   ├── EventBus.pas              Control Plane 専用の通知路 (ADR-001 / §12)
 │   ├── Observability.pas         観測 (ADR-010 / Z-01): 出来事の記録と数値の統計
+│   ├── QsoModel.pas              交信の内部データモデル (ADR-011 / §13)
+│   ├── QsoAdifAdapter.pas        内部モデル <-> ADIF の変換 (ADR-011 / §13.4)
 │   ├── MacroEngine.pas           ラバースタンプ/コンテスト用マクロ (fldigi: macros.cxx)
 │   ├── RxExtract.pas             受信テキストからのコール/RST/ナンバー抽出
 │   └── SafeFileIO.pas            原子的なファイル保存・生バイト読込の共通ヘルパー
@@ -58,6 +60,7 @@ lazarus/
     ├── test_contestlog.lpr   コンテストロギング/DXCC・ゾーン判定の動作確認テスト
     ├── test_opprofile.lpr    運用プロファイル/PC固有設定の動作確認テスト
     ├── test_robustness.lpr   堅牢性・品質改善の回帰テスト
+    ├── test_qsomodel.lpr     交信データモデル/ADIF アダプタの検証 (ADR-011)
     ├── test_threadsafety.lpr 並行処理・音声・PTT の安全性回帰テスト
     ├── TestSupport.pas       テスト共通部品 (Phase 0: Test framework)
     ├── test_macro.lpr        マクロ展開/送信前バリデーション/実行のテスト
@@ -2667,3 +2670,93 @@ v1.1 は Z-01 の目的を「障害診断とアルゴリズム改善の二つ」
 | Plugin API draft / Capability Model | 未着手 |
 | ADR-003 L6 privacy/encryption 方針 | 未着手 |
 | §18 要求トレーサビリティ | 未着手 |
+
+
+## 19. §13 交信データモデルと ADIF アダプタ
+
+決定は `docs/adr/ADR-011-qso-data-model.md`。
+
+### いま起きていた実害
+
+`AdifFile.TAdifDatabase.LoadFromFile` は、固定 61 項目の
+`TAdifFieldId` に無いタグを黙って捨てる。ADIF は 150 以上の標準項目と
+`APP_` 接頭辞の自由項目を持てる書式なので、
+
+> 他のログソフトで作った ADIF を読み込んで書き戻すと項目が減る
+
+という壊れ方をする。取り込み → 書き戻しは日常的な操作で、しかも
+**減ったことに気づけない**。
+
+これは §13.4 が
+
+> 内部データモデルは ADIF そのものに制約せず、
+> Rich Internal Model ↔ ADIF Adapter という関係を維持する
+
+と書いている理由そのものである。「ADIF の形をそのまま内部の形にした」
+結果として出てくる症状にあたる。
+
+### 決めた形
+
+`units/QsoModel.pas` — ADIF を知らない内部モデル。
+
+| 要求元 | どう受けたか |
+|---|---|
+| §13.1 / Phase 4 | 値は `(Value, Origin, State, Evidence)`。抽出した候補と運用者の確定値を区別する |
+| §13.2 / Phase 6 | `TQslConfirmation` を 1 交信に何本でも。`QSL_RCVD` 1 列では表せない状態を持てる |
+| §13.3 / Phase 6 | 局所 ID (`NewQsoId`) と `Revision`、provider ごとの `SyncedRevision` |
+| §11 / Phase 5 | 項目は名前引きの集合。Plugin 項目は `APP.` 接頭辞 |
+| CNT-010 | コンテストの交換項目も同じ仕組みで載る |
+| Z-05 | 挿入順を保持。同じ内容なら同じバイト列が出る |
+
+`Evidence` は **Confidence ではない** (§7 CF-01)。校正されていない内部尺度で、
+`P(correct|c) ≈ c` を満たす確からしさへの変換は Phase 4 の責務である。
+
+`units/QsoAdifAdapter.pas` — 両方を知る唯一の場所。ADIF テキストを
+**直接** `TQsoStore` へ読む (`TAdifRecord` を経由すると 61 項目で漉されて
+しまうため)。既存コード用の `EntryToAdifRecord` / `AdifRecordToEntry` も
+残したが、こちらは損失があるので `AdifRecordDropCount` で件数を数えられる。
+
+### 読み込みで踏んだ落とし穴
+
+`AddQsl` / `Sync` は `Touch` を呼んで `Revision` を進める。よって
+読み込みで先に `Revision` を復元すると、保存した版とずれる。ずれると
+`NeedsSync` が毎回「変わった」と言い、**同期が止まらなくなる**。
+復元は QSL と同期状態を入れ終えた最後に行う。
+
+### 検証
+
+`test/test_qsomodel.lpr` は 123 件。反証で確認した項目:
+
+| 戻した / 壊した箇所 | 落ちるテスト |
+|---|---|
+| 未知の ADIF タグを捨てる | 知らない項目が残る / 書き戻しに出る 他 計11件 |
+| `Revision` を読み込みの先頭で復元 | 改訂番号が読み込みで動かない / 再送が要求されない / 同じ JSON が出る |
+| QSL タグを項目集合にも入れる | QSL タグは項目集合に入らない (計2件) |
+| 長さ分の読み飛ばしをやめる | 値の中のタグらしき文字列から項目を作らない (計2件) |
+| `SetCandidate` が確定値を上書き | 確定済みの項目は候補で上書きされない 他 計4件 |
+| 重複 ID チェックを外す | 重複 ID は拒否される 他 計5件 |
+
+このうち下の 2 つは、最初のテストが通ってしまった (弱かった) ので
+書き直したものである。
+
+- 長さ分の読み飛ばし: 値は長さで切り出すので常に正しく取れる。壊れ方が
+  出るのは「次にどこから読み直すか」で、存在しない項目が生える。
+  値だけ見ていては捕まらないので、項目の件数まで見るようにした。
+- 同期判定: `SyncedRevision` に実際の改訂番号より大きい定数を置いていて、
+  `NeedsSync` が常に False になっていた。実値を入れるように直した。
+
+全17スイート 1017 件成功 (件数を報告する15スイートの合計。test_modem / test_rtty_cw は件数を出さない)。
+
+### Phase 0 の残り
+
+| 項目 | 状態 |
+|---|---|
+| ADR-002 / X-04 / ADR-001 / ADR-009 / ModemUI 移行 / ADR-010 | 完了 |
+| Logging data model (Rich Internal Model ↔ ADIF Adapter) | **完了 (ADR-011)** |
+| Test framework | 着手 (TestSupport.pas) |
+| Plugin API draft / Capability Model | 未着手 |
+| ADR-003 L6 privacy/encryption 方針 | 未着手 |
+| §18 要求トレーサビリティ | 未着手 |
+
+`QsoLogbook.TQsoRecord` は当面そのまま残る。UI がまだこれを使っているため
+で、置き換えは Phase 1 (UI 分離) と合わせて行う。

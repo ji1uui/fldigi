@@ -22,6 +22,7 @@ test/test_evidence
 test/test_realtime
 test/test_eventbus
 test/test_observability
+test/test_qsomodel
 forms/DemoModemApp
 *.res
 # SafeFileIO の一時ファイル (異常終了時のみ残りうる)
