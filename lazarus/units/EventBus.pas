@@ -72,6 +72,8 @@ type
     bekAwardProgressChanged,
     bekContestScoreChanged,
     { --- 機器・エンジン --- }
+    bekModemFrequency,       // 復調中心周波数が変わった (最新値のみ意味を持つ)
+    bekModemMetric,          // 受信品質指標が変わった (最新値のみ意味を持つ)
     bekRigChanged,
     bekTrxStateChanged,      // 送受信状態が変わった
     bekModemChanged,
@@ -91,10 +93,18 @@ type
     低頻度のイベント専用と決めている。 }
   TBusEvent = record
     Kind: TBusEventKind;
-    { 汎用の数値スロット。意味はイベント種別ごとに決める。
-      例) bekDecodedSymbol: I1=文字コード, I2=第2候補件数,
-                            D1=尺度, D2=SNR }
-    I1, I2: Int64;
+    { 汎用の数値スロット。意味は種別ごとに決める。
+
+        bekDecodedSymbol   I1=文字コード I2=尺度種別 I3=第2候補件数
+                           D1=尺度       D2=SNR
+        bekModemFrequency  D1=周波数[Hz]
+        bekModemMetric     D1=指標値
+        bekTrxStateChanged I1=状態値
+
+      種別ごとに型を作らず汎用スロットにしているのは、発行が音声ワーカー
+      から起きるため確保を避けたいからである (X-04)。型安全性を犠牲にする
+      代わりに、意味はこの表と発行側のヘルパー関数で固定する。 }
+    I1, I2, I3: Int64;
     D1, D2: Double;
     { 低頻度イベント専用の文字列スロット。
       高頻度イベントでは使わないこと (確保が走る)。 }
@@ -134,12 +144,19 @@ type
     FShuttingDown: Boolean;
     FInFlight: Integer;
     FSubs: array of TSubscription;
+    { 合流対象イベントの「未配送スロット位置」。-1 = 未配送のものが無い。
+      配送・破棄でスロットが出ていくときに必ず -1 に戻す
+      (戻し忘れると、再利用された別のイベントを上書きしてしまう)。 }
+    FLatestIdx: array[TBusEventKind] of Integer;
     FOnSubscriberError: TBusErrorHandler;
     FAutoDispatch: Boolean;
 
     function EnterPublish: Boolean;
     procedure LeavePublish;
     procedure ScheduleDrain;      // ロック保持中に呼ぶこと
+    { スロットが待ち行列から出ていくときに合流索引を無効化する。
+      ロック保持中に呼ぶこと。 }
+    procedure ReleaseSlot(AIdx: Integer);
     procedure DrainToMainThread;
   public
     constructor Create(ACapacity: Integer = 0);
@@ -150,10 +167,17 @@ type
     { 数値だけのイベントを組み立てて発行する (高頻度用。文字列を使わない)。 }
     procedure PublishNumeric(AKind: TBusEventKind; AI1: Int64 = 0;
       AI2: Int64 = 0; AD1: Double = 0; AD2: Double = 0;
-      const ASource: string = '');
+      const ASource: string = ''; AI3: Int64 = 0);
     { 文字列つきイベントを発行する (低頻度用)。 }
     procedure PublishText(AKind: TBusEventKind; const AText: string;
       const ASource: string = '');
+    { --- 最新値だけが意味を持つイベントの発行 ---
+      同じ種別の未配送イベントが既にあれば、その場で上書きする
+      (積み増さない)。周波数や S メーターのように「最後の値だけ表示できれば
+      よい」ものを FIFO に積むと、更新頻度の高さで復調文字が押し出される。
+      位置は最初に積まれたときのものを保つ (順序は最初の出現で決まる)。 }
+    procedure PublishLatest(AKind: TBusEventKind; AI1: Int64 = 0;
+      AD1: Double = 0; AD2: Double = 0; const ASource: string = '');
 
     { --- 購読 --- }
     { AKinds が空集合ならすべての種別を受け取る。 }
@@ -214,6 +238,8 @@ begin
     bekQslConfirmed:         Result := 'QSLConfirmed';
     bekAwardProgressChanged: Result := 'AwardProgressChanged';
     bekContestScoreChanged:  Result := 'ContestScoreChanged';
+    bekModemFrequency:       Result := 'ModemFrequency';
+    bekModemMetric:          Result := 'ModemMetric';
     bekRigChanged:           Result := 'RigChanged';
     bekTrxStateChanged:      Result := 'TrxStateChanged';
     bekModemChanged:         Result := 'ModemChanged';
@@ -239,6 +265,8 @@ end;
 { TEventBus }
 
 constructor TEventBus.Create(ACapacity: Integer);
+var
+  k: TBusEventKind;
 begin
   inherited Create;
   if ACapacity <= 0 then
@@ -255,6 +283,17 @@ begin
   FShuttingDown := False;
   FInFlight := 0;
   FAutoDispatch := True;
+  for k := Low(TBusEventKind) to High(TBusEventKind) do
+    FLatestIdx[k] := -1;
+end;
+
+procedure TEventBus.ReleaseSlot(AIdx: Integer);
+var
+  k: TBusEventKind;
+begin
+  k := FQueue[AIdx].Kind;
+  if FLatestIdx[k] = AIdx then
+    FLatestIdx[k] := -1;
 end;
 
 destructor TEventBus.Destroy;
@@ -265,6 +304,7 @@ destructor TEventBus.Destroy;
 var
   waited: Integer;
   idle: Boolean;
+  k: TBusEventKind;
 begin
   FShuttingDown := True;
 
@@ -282,6 +322,8 @@ begin
     try
       FQCount := 0;
       FQHead := 0;
+      for k := Low(TBusEventKind) to High(TBusEventKind) do
+        FLatestIdx[k] := -1;
       SetLength(FSubs, 0);
     finally
       FLock.Leave;
@@ -340,6 +382,7 @@ begin
       if FQCount >= Length(FQueue) then
       begin
         { 溢れたら最も古いものを捨てる。黙って失わず件数を記録する。 }
+        ReleaseSlot(FQHead);
         FQHead := (FQHead + 1) mod Length(FQueue);
         Dec(FQCount);
         Inc(FDropped);
@@ -359,13 +402,14 @@ begin
 end;
 
 procedure TEventBus.PublishNumeric(AKind: TBusEventKind; AI1, AI2: Int64;
-  AD1, AD2: Double; const ASource: string);
+  AD1, AD2: Double; const ASource: string; AI3: Int64);
 var
   ev: TBusEvent;
 begin
   ev.Kind := AKind;
   ev.I1 := AI1;
   ev.I2 := AI2;
+  ev.I3 := AI3;
   ev.D1 := AD1;
   ev.D2 := AD2;
   ev.Text := '';
@@ -382,12 +426,58 @@ begin
   ev.Kind := AKind;
   ev.I1 := 0;
   ev.I2 := 0;
+  ev.I3 := 0;
   ev.D1 := 0;
   ev.D2 := 0;
   ev.Text := AText;
   ev.TimestampUtc := 0;
   ev.Source := ASource;
   Publish(ev);
+end;
+
+procedure TEventBus.PublishLatest(AKind: TBusEventKind; AI1: Int64;
+  AD1, AD2: Double; const ASource: string);
+var
+  idx: Integer;
+begin
+  if not EnterPublish then Exit;
+  try
+    FLock.Enter;
+    try
+      if FShuttingDown then Exit;
+      Inc(FPublished);
+      idx := FLatestIdx[AKind];
+      if idx < 0 then
+      begin
+        { 未配送のものが無いので新しく積む }
+        if FQCount >= Length(FQueue) then
+        begin
+          ReleaseSlot(FQHead);
+          FQHead := (FQHead + 1) mod Length(FQueue);
+          Dec(FQCount);
+          Inc(FDropped);
+        end;
+        idx := (FQHead + FQCount) mod Length(FQueue);
+        Inc(FQCount);
+        FLatestIdx[AKind] := idx;
+      end;
+      { 既にあればその場で上書きする (積み増さない) }
+      FQueue[idx].Kind := AKind;
+      FQueue[idx].I1 := AI1;
+      FQueue[idx].I2 := 0;
+      FQueue[idx].I3 := 0;
+      FQueue[idx].D1 := AD1;
+      FQueue[idx].D2 := AD2;
+      FQueue[idx].Text := '';
+      FQueue[idx].Source := ASource;
+      FQueue[idx].TimestampUtc := LocalTimeToUniversal(Now);
+      ScheduleDrain;
+    finally
+      FLock.Leave;
+    end;
+  finally
+    LeavePublish;
+  end;
 end;
 
 procedure TEventBus.Subscribe(AHandler: TBusEventHandler;
@@ -460,6 +550,7 @@ begin
       if haveEvent then
       begin
         ev := FQueue[FQHead];
+        ReleaseSlot(FQHead);
         FQueue[FQHead].Text := '';     // 参照を残さない
         FQueue[FQHead].Source := '';
         FQHead := (FQHead + 1) mod Length(FQueue);
@@ -509,11 +600,15 @@ begin
 end;
 
 procedure TEventBus.Clear;
+var
+  k: TBusEventKind;
 begin
   FLock.Enter;
   try
     FQCount := 0;
     FQHead := 0;
+    for k := Low(TBusEventKind) to High(TBusEventKind) do
+      FLatestIdx[k] := -1;
   finally
     FLock.Leave;
   end;

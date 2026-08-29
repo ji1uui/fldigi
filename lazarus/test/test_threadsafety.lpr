@@ -29,7 +29,7 @@ uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   Classes, SysUtils, SyncObjs,
   SoundIntf, ModemTypes, Modem, ModemEngine, ModemUI, NullModemImpl,
-  RigControlIntf, RigPollThread, DecodeEvidence;
+  RigControlIntf, RigPollThread, DecodeEvidence, EventBus;
 
 var
   FailCount: Integer = 0;
@@ -422,6 +422,99 @@ end;
 { ------------------------------------------------------------------------
   5. ENG-02: RX 継続中のモデム差し替えが安全なこと
   ------------------------------------------------------------------------ }
+procedure TestSharedBusUnsubscribe;
+{ ADR-001 の移行で入った経路。TModemUI が「自前のバス」ではなく
+  外から渡されたバスを共有する場合、破棄時に購読を外さないと
+  バス側に解放済み TModemUI を指すハンドラが残る。
+
+  自前バスの場合はバスごと解放されるので気づけない。
+  共有バスの場合だけ露見するので、そちらを明示的に検査する。 }
+var
+  bus: TEventBus;
+  ui: TModemUI;
+  sink: TUiSink;
+  i: Integer;
+begin
+  WriteLn;
+  WriteLn('--- 14. ADR-001: 共有バスからの購読解除 ---');
+  bus := TEventBus.Create;
+  sink := TUiSink.Create;
+  try
+    bus.AutoDispatch := False;
+    ui := TModemUI.Create(bus);      { バスを共有する }
+    ui.OnRxChar := @sink.OnRxChar;
+    Check(bus.SubscriberCount = 1, 'TModemUI がバスを購読する');
+    Check(ui.Bus = bus, '渡したバスをそのまま使う (自前で作らない)');
+
+    ui.PushEvent(uekRxChar, Ord('A'), '');
+    bus.DispatchPending;
+    Check(sink.Chars.Count = 1, '共有バス経由でイベントが届く');
+
+    ui.Free;
+    Check(bus.SubscriberCount = 0,
+      '破棄時に購読を外す (解放済みハンドラをバスに残さない)');
+
+    { 解放後にバスへ発行しても、解放済みハンドラは呼ばれない }
+    for i := 1 to 10 do
+      bus.PublishNumeric(bekDecodedSymbol, Ord('B'), 0, 0, 0, 'test');
+    bus.DispatchPending;
+    Check(sink.Chars.Count = 1,
+      '破棄後の発行は解放済み TModemUI へ配送されない (実際: ' +
+      IntToStr(sink.Chars.Count) + '件)');
+    Check(bus.SubscriberErrorCount = 0, '購読者の例外も発生していない');
+  finally
+    sink.Free;
+    bus.Free;
+  end;
+end;
+
+procedure TestFrequencyConflationThroughUi;
+{ UI-01: 周波数と S メーターは更新頻度が高く、FIFO に積むと
+  復調文字を押し出す。TModemUI を通した経路で合流していることを確かめる。
+  バス単体の合流テスト (test_eventbus 8) とは別に、
+  TModemUI が合流用の発行を使っているかを見る。 }
+var
+  bus: TEventBus;
+  ui: TModemUI;
+  sink: TUiSink;
+  modem: TNullModem;
+  snd: TNullSoundDevice;
+  i: Integer;
+begin
+  WriteLn;
+  WriteLn('--- 15. UI-01: 周波数更新が復調文字を押し出さないこと ---');
+  snd := TNullSoundDevice.Create;
+  modem := TNullModem.Create(snd);
+  bus := TEventBus.Create(64);   { 小さい容量で押し出しを起こしやすくする }
+  sink := TUiSink.Create;
+  try
+    bus.AutoDispatch := False;
+    ui := TModemUI.Create(bus);
+    try
+      ui.OnRxChar := @sink.OnRxChar;
+      ui.AttachModem(modem);
+
+      { 文字 20 件のあいだに周波数を 500 回更新する }
+      for i := 1 to 20 do
+        ui.PushEvent(uekRxChar, Ord('0') + (i mod 10), '');
+      for i := 1 to 500 do
+        modem.Frequency := 1000 + i;
+
+      bus.DispatchPending;
+      Check(sink.Chars.Count = 20,
+        '文字 20 件がすべて届く (実際: ' + IntToStr(sink.Chars.Count) + ')');
+      Check(ui.DroppedEventCount = 0,
+        '周波数更新で文字が押し出されていない (捨てた件数 ' +
+        IntToStr(ui.DroppedEventCount) + ')');
+      ui.DetachModem;
+    finally
+      ui.Free;
+    end;
+  finally
+    sink.Free; bus.Free; modem.Free; snd.Free;
+  end;
+end;
+
 procedure TestModemSwapUnderLoad;
 const
   SWAPS = 30;
@@ -1100,6 +1193,8 @@ begin
   TestRigPollFastShutdown;
   TestPttFailsafeObservable;
   TestNoSpuriousErrorOnShutdown;
+  TestSharedBusUnsubscribe;
+  TestFrequencyConflationThroughUi;
 
   WriteLn;
   WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 (全 ', TestCount, ' 件中) ===');

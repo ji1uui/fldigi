@@ -354,6 +354,60 @@ begin
   Check(True, IntToStr(ROUNDS) + ' 回の「発行スレッド走行中の生成・破棄」が完了する');
 end;
 
+procedure TestConflation;
+{ 最新値だけが意味を持つイベントは積み増さないこと。
+  周波数や S メーターは更新頻度が高く、FIFO に積むと復調文字を
+  押し出してしまう。 }
+var
+  bus: TEventBus;
+  r: TRecorder;
+  i: Integer;
+begin
+  WriteLn;
+  WriteLn('--- 8. 最新値イベントの合流 ---');
+  bus := TEventBus.Create(64);
+  r := TRecorder.Create;
+  try
+    bus.AutoDispatch := False;
+    bus.Subscribe(@r.Handle);
+
+    for i := 1 to 100 do
+      bus.PublishLatest(bekModemFrequency, 0, 1000 + i);
+    Check(bus.PendingCount = 1,
+      '100 回発行しても待ち行列は 1 件 (実際: ' +
+      IntToStr(bus.PendingCount) + ')');
+    Check(bus.DroppedCount = 0,
+      '合流なので「捨てた」にはならない (実際: ' +
+      IntToStr(bus.DroppedCount) + ')');
+    bus.DispatchPending;
+    Check(r.Kinds.Count = 1, '配送も 1 件');
+
+    { 合流イベントが FIFO のイベントを押し出さないこと }
+    r.Kinds.Clear; r.Ints.Clear; r.Texts.Clear;
+    for i := 1 to 20 do
+      bus.PublishNumeric(bekDecodedSymbol, i);
+    for i := 1 to 500 do
+      bus.PublishLatest(bekModemMetric, 0, i);
+    bus.DispatchPending;
+    Check(r.Kinds.Count = 21,
+      '文字 20 件 + 合流 1 件 = 21 件 (実際: ' +
+      IntToStr(r.Kinds.Count) + ')');
+    Check(bus.DroppedCount = 0, '文字が押し出されていない');
+
+    { 配送後は新しく積み直される }
+    bus.PublishLatest(bekModemFrequency, 0, 7000);
+    Check(bus.PendingCount = 1, '配送後の発行は新しい 1 件になる');
+    bus.DispatchPending;
+
+    { 種別ごとに独立していること }
+    bus.PublishLatest(bekModemFrequency, 0, 1);
+    bus.PublishLatest(bekModemMetric, 0, 2);
+    Check(bus.PendingCount = 2, '種別が違えば別々に保持される');
+  finally
+    r.Free; bus.Free;
+  end;
+end;
+
 procedure TestControlPlaneOnly;
 { ADR-001: Data Plane のデータを載せられない構造になっていること。
   イベントが固定長レコードであることを大きさで確認する。
@@ -391,6 +445,7 @@ begin
   TestBounded;
   TestReentrantPublish;
   TestConcurrentPublishAndDestroy;
+  TestConflation;
   TestControlPlaneOnly;
 
   WriteLn;
