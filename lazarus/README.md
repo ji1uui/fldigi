@@ -38,6 +38,7 @@ lazarus/
 │   ├── OpProfile.pas             運用プロファイル (局/運用者/運用地/設備/形態の5軸)
 │   ├── AppConfig.pas             PC固有設定(接続軸)・セッション状態
 │   ├── DecodeEvidence.pas        復調結果と根拠 (ADR-002 / Phase 0 Core interface)
+│   ├── EventBus.pas              Control Plane 専用の通知路 (ADR-001 / §12)
 │   ├── MacroEngine.pas           ラバースタンプ/コンテスト用マクロ (fldigi: macros.cxx)
 │   ├── RxExtract.pas             受信テキストからのコール/RST/ナンバー抽出
 │   └── SafeFileIO.pas            原子的なファイル保存・生バイト読込の共通ヘルパー
@@ -60,7 +61,9 @@ lazarus/
     ├── TestSupport.pas       テスト共通部品 (Phase 0: Test framework)
     ├── test_macro.lpr        マクロ展開/送信前バリデーション/実行のテスト
     ├── test_rxextract.lpr    受信抽出/宣言的条件分岐のテスト
-    └── test_evidence.lpr     ADR-002 Modem API (Evidence) のテスト
+    ├── test_evidence.lpr     ADR-002 Modem API (Evidence) のテスト
+    ├── test_realtime.lpr     X-04 realtime 経路の動的確保の検証
+    └── test_eventbus.lpr     ADR-001 / §12 Event Bus のテスト
 ```
 
 ## 1. モデムエンジン設計 (`TCustomModem` / `TModemEngine`)
@@ -2324,3 +2327,115 @@ RTTY ループバックテストが即座に落ちたので気づけた。仮復
 | Observability (Z-01) | 未着手 |
 | ADR-003 L6 privacy/encryption 方針 | 未着手 |
 | §18 要求トレーサビリティ (既存実装への REQ-ID 付与) | 未着手 |
+
+
+## 15. Phase 0 続き: X-04 (realtime の確保除去) と ADR-001 (Event Bus)
+
+### 15-1. X-04 realtime 経路の動的確保を除去
+
+FPC のメモリマネージャはロックを取る。音声スレッドがそこで待たされると
+deadline を落として underrun になる (Z-04 Deterministic Realtime)。
+
+| 場所 | 何が起きていたか |
+|---|---|
+| `PortAudioSoundDevice` の Read/Write/WriteStereo | 呼び出しのたびにローカルの動的配列を `SetLength` |
+| `RttyModemImpl` / `CwModemImpl` の `SendSymbol` | シンボルごとに波形バッファを確保 |
+
+どちらも「Open 時に確保して伸ばすだけ」のバッファへ移した。送信バッファは
+両モデム共通なので基底 `TCustomModem` に置いた。
+
+#### 「確保していない」をどう検証するか
+
+コードを読むだけでは保証できない。動的配列の `SetLength`、文字列の連結、
+一時オブジェクトの生成は見落としやすく、しかも**確保と解放が対になっていると
+使用量を測っても検出できない**（増えて減るので差分が 0 になる）。
+
+そこで**測定区間だけメモリマネージャを差し替え、`GetMem` / `ReAllocMem` の
+呼び出し回数そのものを数える**。
+
+```
+RTTY 送信 48840 サンプル: 242 回 → 4 回
+CW   送信 72502 サンプル:  66 回 → 4 回
+RTTY 受信 100 ブロック  :   0 回 (元から確保なし)
+```
+
+判定は絶対値ではなく**「確保回数が送信量・ブロック数に比例しないこと」**。
+測定自体が空振りしていないことを確かめるテスト（意図的に 50 回確保して
+50 回検出する）も入れてある。修正を戻すと該当 2 件が実際に失敗する。
+
+復調して文字が出た瞬間は Evidence の候補配列を作るので確保が入る。
+RTTY 45baud で毎秒 6 回程度、音声ブロックの 16 回/秒と比べて支配的でないため
+意図的に許容している（テストは無信号で測ってこれを区別している）。
+
+### 15-2. ADR-001 Data Plane / Control Plane 境界と Event Bus
+
+決定は `docs/adr/ADR-001-data-control-plane.md`。
+
+#### 境界を型で守る
+
+Event Bus は Control Plane 専用で、Audio / IQ / Spectrum は載せない。
+規約だけで守るのは無理なので、**載せられない構造**にした。
+
+```pascal
+TBusEvent = record
+  Kind: TBusEventKind;
+  I1, I2: Int64;            // 汎用の数値スロット
+  D1, D2: Double;
+  Text: string;             // 低頻度イベント専用
+  TimestampUtc: TDateTime;
+  Source: string;
+end;
+```
+
+**固定長レコード**なので配列もストリームも持てない。`SizeOf` は 64 バイトで、
+回帰テストで固定してある（意図しない拡張に気づけるように）。文字列が 1 本
+あるのは例外で、確保を伴うため低頻度イベント専用と決めている。
+
+#### 購読者の例外でバスを止めない (§12)
+
+1 つの購読者が投げた例外で他の購読者への配送が止まると障害が波及する
+(B-04 / Z-06)。購読者ごとに例外境界を置き、件数を数えて通知したうえで
+**残りの購読者への配送を続ける**。
+
+配送はイベントと購読者一覧をロック下で写し取り、呼び出しはロック外で行う。
+購読者がバスへ発行し返してもデッドロックしない。
+
+#### 有界であること
+
+`ModemUI` で先に確立した方式（有界FIFO＋単一ドレイン＋在席カウンタ）を
+バス側の責務として引き上げた。UI が詰まってもメモリが伸び続けず、
+溢れたら古いものから捨てて件数を数える。
+
+#### 観測 (Z-01)
+
+`PublishedCount` / `DeliveredCount` / `DroppedCount` / `SubscriberErrorCount`
+を公開する。`DroppedCount` が 0 でなければ購読側が追いついていない、
+`SubscriberErrorCount` が増えていればどこかの購読者が壊れている、と外から分かる。
+
+### 15-3. 検証
+
+```bash
+./run_tests.sh
+```
+
+全15スイート 808 件成功。
+
+| スイート | 件数 | 重点 |
+|---|---|---|
+| `test_realtime` | 5 | 確保回数を実測。測定の妥当性も検査 |
+| `test_eventbus` | 37 | 例外封じ込め・有界性・絞り込み・再発行・並行破棄・固定長 |
+
+### 15-4. Phase 0 の残り
+
+| 項目 | 状態 |
+|---|---|
+| ADR-002 Modem interface | **完了** |
+| X-04 realtime の確保除去 | **完了** |
+| ADR-001 Data/Control Plane 境界・Event Bus | **完了 (バス単体)** |
+| Test framework | **着手** (TestSupport.pas) |
+| `ModemUI` をバスの購読者へ移行 | 未着手 |
+| Plugin API draft / Capability Model | 未着手 |
+| Logging data model (Rich Internal Model ↔ ADIF Adapter) | 未着手 |
+| Observability (Z-01) の記録経路 | 未着手 (バスの計数のみ) |
+| ADR-003 L6 privacy/encryption 方針 | 未着手 |
+| §18 要求トレーサビリティ | 未着手 |
