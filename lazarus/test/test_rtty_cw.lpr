@@ -225,12 +225,28 @@ begin
 
   WriteLn('  復調結果      : ', RxSink.Text);
 
-  NormalizedActual := UpperCase(RxSink.Text);
-  Passed := Pos('CQ', NormalizedActual) > 0;
+  NormalizedActual := Trim(UpperCase(RxSink.Text));
+
+  { --- 判定を全文一致にした理由 ---
+    以前は Pos('CQ') > 0 だけを見ていた。これだと先頭の C が E に
+    化けていても "CQ" は 2 番目の CQ で見つかるので通ってしまい、
+    実際に長らく気づかれないままだった (送信 CQ CQ... に対し
+    復調 EQ CQ... で [OK] が出ていた)。
+
+    先頭文字は雑音スパイクの棄却で壊れやすい場所なので、
+    そこを名指しで見る判定にする。 }
+  Passed := NormalizedActual = TestMsg;
   if Passed then
-    WriteLn('  [OK] 復調結果に "CQ" が検出された')
+    WriteLn('  [OK] 復調結果が送信文字列と完全に一致した')
   else
-    Fail('復調結果に "CQ" が見つからない!');
+    Fail(Format('復調結果が一致しない! 期待[%s] 実際[%s]',
+      [TestMsg, NormalizedActual]));
+
+  if Copy(NormalizedActual, 1, 1) = Copy(TestMsg, 1, 1) then
+    WriteLn('  [OK] 先頭文字が失われていない')
+  else
+    Fail(Format('先頭文字が失われた! 期待[%s] 実際[%s]',
+      [Copy(TestMsg, 1, 1), Copy(NormalizedActual, 1, 1)]));
 
   TxModem.Free;
   RxModem.Free;

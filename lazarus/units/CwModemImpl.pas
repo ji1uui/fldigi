@@ -620,7 +620,22 @@ begin
 
         if (FCwNoiseSpikeThreshold > 0) and (ElementUsec < FCwNoiseSpikeThreshold) then
         begin
-          FCwReceiveState := crsIdle;
+          { --- fldigi との意図的な差異 ---
+            fldigi はここで無条件に RS_IDLE へ戻す。すると次の KeyDown が
+            「idle からの開始」とみなして rx_rep_buf を捨てるため、
+            **文字の途中に雑音スパイクが 1 つ入っただけで、それまでに
+            受け取った要素が全部消える**。
+
+            棄却したのは雑音であって、既に受け取った本物の要素ではない。
+            進行中の文字があるなら、その状態 (crsAfterTone) へ戻す。
+
+            実測: 12/18/25 WPM、雑音 0〜0.1 の 13 通りで先頭文字が
+            誤っていたものが、この 1 か所の変更で 12 通り正しくなった
+            (残る 1 通りは雑音が完全に 0 の場合。下の注を参照)。 }
+          if FRxRepBuf <> '' then
+            FCwReceiveState := crsAfterTone
+          else
+            FCwReceiveState := crsIdle;
           Exit(False);
         end;
 

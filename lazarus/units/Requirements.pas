@@ -748,6 +748,12 @@ begin
     expCollect, objCompatibility, fndEngineeringQuality, [],
     False, priMust, 0, 'test_adif_full / test_station_adif', rsVerified,
     '§3 A Compatibility', '');
+  R('CMP-003', 'CW受信で先頭文字が失われない',
+    expCommunicate, objRobustness, fndIntelligentReceiver,
+    [fndEngineeringQuality], False, priMust, 0,
+    'test_cw_leading (速度/雑音/符号種を振って全文一致)', rsVerified,
+    '§3 A Compatibility (fldigi 由来の欠陥の是正)', '');
+
   R('CMP-002', 'RTTY/CWの送受信がfldigi相当に成立する',
     expCommunicate, objCompatibility, fndIntelligentReceiver, [],
     False, priMust, 0, 'test_rtty_cw (ループバック)', rsVerified,

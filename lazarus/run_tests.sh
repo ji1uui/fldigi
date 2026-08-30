@@ -16,7 +16,7 @@ cd "$(dirname "$0")"
 SUITES="test_contestlog test_fftfilt test_filter_switch test_opprofile \
 test_robustness test_rtty_cw test_station_adif test_adif_full \
 test_modem test_threadsafety test_macro test_rxextract test_evidence test_realtime test_eventbus test_observability \
-test_qsomodel test_plugin test_context_memory test_audioring test_capture test_fftshared"
+test_qsomodel test_plugin test_context_memory test_audioring test_capture test_fftshared test_cw_leading"
 
 # §18 の突き合わせは他スイートの申告を材料にするので **最後** に走らせる。
 # SUITES には入れず、実行段で末尾に足す。

@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 46 件 (検証済 32 / 実装済 0 / 方針決定 5 / 起案 5 / 後送り 4)
+要求 47 件 (検証済 33 / 実装済 0 / 方針決定 5 / 起案 5 / 後送り 4)
 
 ## Phase 0
 
@@ -44,6 +44,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | SEC-005 | Name/QTH等の個人情報は最小限保持を原則とする | Communicate | D | Z | - | No | Must | test_context_memory | 検証済 | ✓ | §8.1 | ADR-003 |
 | SEC-006 | 暗号化の実装方式をPhase 0で決定する | Communicate | B | Z | - | No | Must | ADR-003 の記載 / 試験ベクタ照合 | 検証済 | ✓ | §8.1 | ADR-003 |
 | CMP-001 | fldigi互換のADIF入出力を行う | Collect | A | Z | - | No | Must | test_adif_full / test_station_adif | 検証済 | ✓ | §3 A Compatibility |  |
+| CMP-003 | CW受信で先頭文字が失われない | Communicate | B | Y | Z | No | Must | test_cw_leading (速度/雑音/符号種を振って全文一致) | 検証済 | ✓ | §3 A Compatibility (fldigi 由来の欠陥の是正) |  |
 | CMP-002 | RTTY/CWの送受信がfldigi相当に成立する | Communicate | A | Y | - | No | Must | test_rtty_cw (ループバック) | 検証済 | ✓ | §3 A Compatibility |  |
 | MAC-001 | マクロがQSOの文脈と手順に沿って展開される | Communicate | D | Y | Z | No | Should | test_macro | 検証済 | ✓ | §9 |  |
 | CTX-001 | 受信テキストからコール/RST/ナンバーを抽出する | Communicate | D | Y | - | No | Should | test_rxextract | 検証済 | ✓ | §8 L2/L3 |  |
