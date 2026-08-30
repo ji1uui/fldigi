@@ -205,7 +205,14 @@ begin
 end;
 
 destructor THamlibRigControl.Destroy;
+{ RIG-11: PTT の解除は "ここ" で行う必要がある。
+  基底 TCustomRigControl.Destroy にも EnsurePttOff があるが、それが走るのは
+  この本体が終わった後 (inherited Destroy) であり、その時点では既に
+  Close 済み = FIsOpen が False なので、何もできずに終わっていた。
+  つまり実機クラスではフェイルセーフが働いていなかった。
+  Close より先に、通信路が生きているうちに下ろす。 }
 begin
+  EnsurePttOff;
   if IsOpen then
     Close;
   if FHandle <> nil then
@@ -440,8 +447,18 @@ begin
   for i := 1 to RetryCount do
   begin
     err := rig_set_ptt(FHandle, nvfo, pttVal);
-    if err = RIG_OK then Exit;
+    if err = RIG_OK then
+    begin
+      { RIG-11: 実際に PTT を操作できたときだけ状態を記録する。
+        これにより EnsurePttOff が「自分が上げた送信」を確実に下ろせる。 }
+      NotePttState(OnOff);
+      Exit;
+    end;
   end;
+  { 送信 ON に失敗した場合でも、リグ側が中途半端に送信状態へ入っている
+    可能性があるため、フェイルセーフの対象として記録しておく。 }
+  if OnOff then
+    NotePttState(True);
   CheckErr(err, 'rig_set_ptt');
 end;
 

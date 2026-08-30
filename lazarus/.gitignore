@@ -10,6 +10,28 @@ test/test_portaudio
 test/test_rigcontrol
 test/test_station_adif
 test/test_contestlog
+test/test_fftfilt
+test/test_filter_switch
+test/test_opprofile
+test/test_robustness
+test/test_threadsafety
+test/test_adif_full
+test/test_macro
+test/test_rxextract
+test/test_evidence
+test/test_realtime
+test/test_eventbus
+test/test_observability
+test/test_qsomodel
+test/test_plugin
+test/test_context_memory
+test/test_requirements
+test/coverage/
 forms/DemoModemApp
 *.res
+# SafeFileIO の一時ファイル (異常終了時のみ残りうる)
+*.json.tmp
+*.adi.tmp
 backup/
+# ビルドログ
+*.log

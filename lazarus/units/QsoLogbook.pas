@@ -36,7 +36,8 @@ unit QsoLogbook;
 interface
 
 uses
-  Classes, SysUtils, DateUtils, fpjson, jsonparser, AdifUdpSender, StationInfo;
+  Classes, SysUtils, DateUtils, fpjson, jsonparser, AdifUdpSender, StationInfo,
+  SafeFileIO;
 
 type
   { TQsoRecord
@@ -185,6 +186,10 @@ end;
 
 function TQsoLogbook.GetRecord(AIndex: Integer): TQsoRecord;
 begin
+  { 範囲外アクセスはアクセス違反ではなく、原因の分かる例外にする。 }
+  if (AIndex < 0) or (AIndex >= Length(FRecords)) then
+    raise EQsoLogbookError.CreateFmt(
+      'QSO番号が範囲外です: %d (件数 %d)', [AIndex, Length(FRecords)]);
   Result := FRecords[AIndex];
 end;
 
@@ -313,7 +318,6 @@ var
   arr: TJSONArray;
   itemObj: TJSONObject;
   i: Integer;
-  sl: TStringList;
 begin
   root := TJSONObject.Create;
   try
@@ -337,13 +341,9 @@ begin
     end;
     root.Add(KEY_RECORDS, arr);
 
-    sl := TStringList.Create;
-    try
-      sl.Text := root.FormatJSON;
-      sl.SaveToFile(AFileName);
-    finally
-      sl.Free;
-    end;
+    { 一時ファイル + rename による原子的保存 (SafeFileIO 参照)。
+      移動運用中にバッテリーが切れても交信ログが失われない。 }
+    SaveTextAtomic(AFileName, root.FormatJSON);
   finally
     root.Free;
   end;
@@ -363,5 +363,12 @@ procedure TQsoLogbook.Clear;
 begin
   SetLength(FRecords, 0);
 end;
+
+initialization
+  { 日本語 (相手局の名前・QTH 等) を JSON 往復で壊さないための必須設定。
+    理由と詳細は StationInfo.pas の initialization のコメントを参照。
+    プロセス全体に効く冪等な設定であり、JSON 永続化を行う各ユニットが
+    リンク順に依存せず単体で正しく動くよう、ここでも宣言している。 }
+  SetMultiByteConversionCodePage(CP_UTF8);
 
 end.

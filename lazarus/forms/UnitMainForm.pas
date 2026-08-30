@@ -31,7 +31,7 @@ interface
 uses
   Classes, SysUtils, SyncObjs,
   Forms, Controls, StdCtrls, ComCtrls, ExtCtrls, Dialogs,
-  SoundIntf, ModemTypes, Modem, ModemEngine, ModemUI, NullModemImpl;
+  SoundIntf, ModemTypes, Modem, ModemEngine, ModemUI, DecodeEvidence, NullModemImpl;
 
 type
 
@@ -65,7 +65,8 @@ type
     procedure HandleFrequencyChanged(Sender: TModemUI; AFrequency: Double);
     procedure HandleMetricChanged(Sender: TModemUI; AMetric: Double);
     procedure HandleStatusText(Sender: TModemUI; const AText: string);
-    procedure HandleRxChar(Sender: TModemUI; ACh: Integer);
+    procedure HandleRxChar(Sender: TModemUI; ACh: Integer;
+      AMetricKind: TEvidenceMetricKind; AMetric: Double; AAltCount: Integer);
     procedure HandleStateChanged(Sender: TModemUI; AState: TTrxState);
     procedure HandleError(Sender: TModemUI; const AMsg: string);
 
@@ -126,17 +127,41 @@ begin
 end;
 
 destructor TMainForm.Destroy;
+{ APP-01: 以前は FEngine.Free の後に FUI.Free していたため、
+  TModemUI.Destroy -> DetachEngine が解放済みエンジンのイベントへ
+  書き込む use-after-free になっていた。
+
+  ただし「UI を先に Free」だけでも足りない。切り離しは "これから来る"
+  通知を止めるだけで、既にワーカーが TModemUI の中に入っている呼び出しは
+  止められないからである。確実なのは、
+    ワーカースレッドを完全に停止させてから UI を破棄する
+  という順序。停止後ならコールバックの発生源そのものが無い。
+  エンジン "オブジェクト" は UI が切り離しに使うので、UI より後に解放する。 }
 begin
+  { 1. ワーカースレッドを止める。ここが完了した時点で、モデム/エンジンから
+       UI へのコールバックは発生しえない (ブロッキングI/Oも解除済み)。 }
   if Assigned(FEngine) then
   begin
-    FEngine.RequestExit;
+    FEngine.RequestExit;   // ブロッキングI/Oの解除も行う (ENG-04)
     FEngine.WaitFor;
-    FEngine.Free;
   end;
+
+  { 2. UI を破棄する。DetachEngine がエンジンのイベントを外すので、
+       エンジン本体はまだ生きている必要がある。 }
   FUI.Free;
+  FUI := nil;
+
+  { 3. エンジン本体を破棄する (スレッドは既に停止済み)。 }
+  FEngine.Free;
+  FEngine := nil;
+
+  { 4. エンジンが完全に止まってからモデムとデバイスを解放する。 }
   FModem.Free;
+  FModem := nil;
   FSound.Free;
+  FSound := nil;
   FTxLock.Free;
+  FTxLock := nil;
   inherited Destroy;
 end;
 
@@ -202,7 +227,8 @@ begin
   StatusBar1.SimpleText := AText;
 end;
 
-procedure TMainForm.HandleRxChar(Sender: TModemUI; ACh: Integer);
+procedure TMainForm.HandleRxChar(Sender: TModemUI; ACh: Integer;
+  AMetricKind: TEvidenceMetricKind; AMetric: Double; AAltCount: Integer);
 begin
   // fldigi: put_rx_char(unsigned int data) に相当。
   // 受信復調された1文字をテキスト表示に追記する。

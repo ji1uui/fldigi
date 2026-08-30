@@ -8,11 +8,18 @@
   fldigi との対応 (実装した範囲):
   ----------------------------------------------------------------------------
   - Baudot 5bit 符号表 (letters[]/figures[]) と baudot_enc/baudot_dec
-  - Mark/Space ミキサー (rtty::mixer) + 包絡線検波
-    ※ fldigi 本体は fftfilt (FFTオーバーラップ加算窓関数フィルタ) を
-       使うが、本移植版は ModemDSP.TComplexLowpass (1次IIR) で代替する
-       (フィルタの通過帯域特性は簡略化されるが、ステートマシン自体の
-       アルゴリズムは fldigi と同一)。
+  - Mark/Space ミキサー (rtty::mixer) + fldigi 本来の fftfilt
+    (ModemDSP.TFftFilt。Overlap-Add FFT畳み込み、rtty_filter()による
+    raised-cosine整合フィルタ) + 包絡線検波
+    【2026-08 フィルタ品質改善】当初は ModemDSP.TComplexLowpass (1次IIR)
+    で代替していたが、fldigi 本来の fftfilt::rtty_filter() を
+    ModemDSP.TFftFilt として移植し、置き換えた (rtty.cxx の
+    reset_filters()/FILTLEN[] をそのまま踏襲)。TFftFilt.Run() は
+    flen2 サンプル溜まるまで0を返し、溜まったら flen2 個まとめて返す
+    ブロック処理のため、RxProcess() 内の包絡線検波以降のロジックは
+    ProcessFilteredSample() に切り出し、フィルタが実際に出力した
+    サンプルの数だけ呼び出す構造に変更した (fldigi rtty.cxx の
+    `for (int i = 0; i < n_out; i++)` ループにそのまま対応)。
   - 受信ステートマシン (rtty::rx(): IDLE→START→DATA→STOP) をそのまま移植
   - decode_char() (パリティ検査 + Baudot デコード)
   - AFC (自動周波数制御。マーク/スペール履歴の位相差から周波数誤差を算出)
@@ -34,7 +41,8 @@ unit RttyModemImpl;
 interface
 
 uses
-  Classes, SysUtils, Math, SoundIntf, ModemTypes, Modem, ModemDSP;
+  Classes, SysUtils, Math, SoundIntf, ModemTypes, Modem, ModemDSP,
+  DecodeEvidence;
 
 const
   RTTY_SAMPLE_RATE = 8000;      // fldigi: #define RTTY_SampleRate 8000
@@ -47,6 +55,9 @@ const
   RttyShiftTable: array[0..9] of Double = (23, 85, 160, 170, 182, 200, 240, 350, 425, 850);
   RttyBaudTable: array[0..9] of Double = (45, 45.45, 50, 56, 75, 100, 110, 150, 200, 300);
   RttyBitsTable: array[0..2] of Integer = (5, 7, 8);
+  { fldigi: rtty::FILTLEN[] (rtty.cxx)。BAUD[]と同じ添字で引く
+    fftfilt の flen (2の冪乗、baudが速いほど短い)。 }
+  RttyFiltLenTable: array[0..9] of Integer = (512, 512, 512, 512, 512, 512, 512, 256, 128, 64);
 
 type
   TRttyRxState = (
@@ -75,6 +86,7 @@ type
     // --- 設定パラメータ (fldigi: rtty_shift, rtty_baud, rtty_bits, ...) ---
     FShift: Double;          // fldigi: shift / rtty_shift
     FBaud: Double;           // fldigi: rtty_baud
+    FBaudIndex: Integer;     // fldigi: progdefaults.rtty_baud (RttyFiltLenTable添字用)
     FBits: Integer;          // fldigi: rtty_bits (5/7/8)
     FParity: TRttyParity;    // fldigi: rtty_parity
     FStopBits: Double;       // fldigi: rtty_stop -> stl (1.0/1.5/2.0)
@@ -84,9 +96,20 @@ type
     // --- 受信 DSP 状態 ---
     FMarkPhase: Double;      // fldigi: mark_phase
     FSpacePhase: Double;     // fldigi: space_phase
-    FMarkFilt: TComplexLowpass; // fldigi: fftfilt *mark_filt (簡略化)
-    FSpaceFilt: TComplexLowpass;// fldigi: fftfilt *space_filt (簡略化)
+    FMarkFilt: TFftFilt;     // fldigi: fftfilt *mark_filt
+    FSpaceFilt: TFftFilt;    // fldigi: fftfilt *space_filt
     FBitBuf: array[0..RTTY_MAXBITS-1] of Boolean; // fldigi: bit_buf[MAXBITS]
+    { ADR-002: 軟判定の余裕を運ぶための追加状態。
+      ATC 判定変数 V3 の符号がビット値、大きさが「判定境界からの距離」に
+      あたる。包絡線エネルギーで正規化すると -1..+1 の無次元量になり、
+      0 に近いほど「どちらとも言えない」ビットである。
+      これを文字組み立ての間ずっと保持しておき、最も弱かったビットを
+      反転した文字を第2候補として出す。 }
+    FMarginBuf: array[0..RTTY_MAXBITS-1] of Double;  // FBitBuf と同期して流す
+    FLastMargin: Double;                 // 直近サンプルの正規化余裕
+    FDataMargin: array[0..RTTY_MAXBITS-1] of Double; // データビットごとの余裕
+    FLastSnrDb: Double;                  // 直近に算出した SNR (Evidence 用)
+    FSamplePos: Int64;                   // Open からの通算サンプル数 (Replay 用)
     FMarkEnv, FMarkNoise: Double;  // fldigi: mark_env, mark_noise
     FSpaceEnv, FSpaceNoise: Double;// fldigi: space_env, space_noise
     FNoiseFloor: Double;          // fldigi: noise_floor
@@ -94,6 +117,16 @@ type
 
     FRxState: TRttyRxState;  // fldigi: rxstate
     FRxMode: Integer;        // fldigi: rxmode (LETTERS/FIGURES)
+    { Unshift On Space。fldigi は progdefaults の全体設定だったが、
+      本移植版ではインスタンスごとに持つ。理由は2つある。
+        (1) 送信用と受信用に別インスタンスを持つ設計なので、全体設定だと
+            片方の変更がもう片方にも及んでしまう (実際に不具合だった)。
+        (2) 設定違いの復調器を同じ音声に対して並列評価する
+            (v1.1 C-06) には、設定がインスタンスに閉じている必要がある。
+      「状態をインスタンスに閉じ込める」規律は、並列化を後回しにしても
+      後から入れられる形を保つための対価である (ADR-009)。 }
+    FUosTx: Boolean;
+    FUosRx: Boolean;
     FShiftState: Integer;    // fldigi: shift_state (送信用)
     FCounter: Integer;       // fldigi: counter
     FBitCntr: Integer;       // fldigi: bitcntr
@@ -118,9 +151,21 @@ type
 
     function Mixer(var APhase: Double; AFreq: Double; const AIn: TComplex): TComplex;
     function DecodeChar: Integer;
+    { ADR-002: 復調した文字を Evidence として送り出す。
+      軟判定の余裕から「文字全体の確からしさ」と「第2候補」を作る。
+      文字の確からしさは、その文字を構成したデータビットのうち
+      最も余裕が小さかったものが決める (弱いビットが1つでもあれば
+      文字全体が危うい)。第2候補は、その最も弱いビットを反転した文字。
+      これは Phase 4 の Context Assistance が「補正候補」として使う。 }
+    procedure EmitDecodedChar(ACh: Integer);
+    { 副作用を残さない仮復号 (第2候補の算出用)。 }
+    function SpeculativeDecode(AData: Integer): Integer;
     function IsMark: Boolean;
     function IsMarkSpace(out ACorrection: Integer): Boolean;
     function RxBit(ABit: Boolean): Boolean; // fldigi: rtty::rx(bool bit)
+    procedure ResetFilters;  // fldigi: rtty::reset_filters()
+    procedure ProcessFilteredSample(const AZMark, AZSpace: TComplex);
+      // fldigi: rtty::rx_process() の n_out ループ本体
 
     function Nco(AFreq: Double): Double;    // fldigi: rtty::nco()
     procedure SendSymbol(ASymbol: Integer; ALen: Integer; ASoundOut: Boolean = True);
@@ -157,9 +202,19 @@ type
     property Shift: Double read FShift;
     property Baud: Double read FBaud;
     property AfcOn: Boolean read FAfcOn write FAfcOn;
+    { 設定がインスタンスに閉じていることを外から確かめられるようにする。 }
+    property UnshiftOnSpaceTx: Boolean read FUosTx write SetUnshiftOnSpaceTx;
+    property UnshiftOnSpaceRx: Boolean read FUosRx write SetUnshiftOnSpaceRx;
   end;
 
 implementation
+
+
+const
+  { 第2候補を出す軟判定余裕のしきい値。
+    これより余裕がある (判定が明確な) 文字には候補を足さない。
+    足しても選ばれないうえ、Phase 4 の補正候補提示が雑音だらけになる。 }
+  ALT_CANDIDATE_MARGIN = 0.5;
 
 const
   { fldigi: static char letters[32] (rtty.cxx) }
@@ -176,10 +231,6 @@ const
     '5', '"', ')', '2', '#', '6', '0', '1',
     '9', '?', '&', ' ', '.', '/', ';', ' '
   );
-
-var
-  UOSTx: Boolean = True;  // fldigi: progdefaults.UOStx
-  UOSRx: Boolean = True;  // fldigi: progdefaults.UOSrx
 
 { ---- パリティ計算 (fldigi: static int rparity() / int rttyparity()) ---- }
 
@@ -223,13 +274,17 @@ begin
   FAfcOn := True;
   FAfcSpeed := 1; // fldigi 既定: progdefaults.rtty_afcspeed = 1 (medium)
   FShift := RttyShiftTable[1];   // 既定 85Hz
-  FBaud := RttyBaudTable[1];     // 既定 45.45 baud
+  FBaudIndex := 1;
+  FBaud := RttyBaudTable[FBaudIndex];     // 既定 45.45 baud
   FBits := 5;
   FParity := rpNone;
   FStopBits := 1.5;
+  { fldigi の progdefaults 既定値 (UOStx/UOSrx = true) と同じ }
+  FUosTx := True;
+  FUosRx := True;
 
-  FMarkFilt := TComplexLowpass.Create(FBaud, SampleRate);
-  FSpaceFilt := TComplexLowpass.Create(FBaud, SampleRate);
+  FMarkFilt := TFftFilt.Create(RttyFiltLenTable[FBaudIndex]);
+  FSpaceFilt := TFftFilt.Create(RttyFiltLenTable[FBaudIndex]);
 
   FRxMode := RTTY_LETTERS;
   FShiftState := RTTY_LETTERS;
@@ -253,8 +308,7 @@ begin
   FStopLen := Round(FStopBits * SampleRate / FBaud);
   Bandwidth := FShift;
 
-  FMarkFilt.SetCutoff(FBaud, SampleRate);
-  FSpaceFilt.SetCutoff(FBaud, SampleRate);
+  ResetFilters;
 
   for i := 0 to RTTY_MAXBITS - 1 do
     FBitBuf[i] := False;
@@ -262,6 +316,18 @@ begin
   FMarkNoise := 0;
   FSpaceNoise := 0;
   FBit := True;
+end;
+
+procedure TRttyModem.ResetFilters;
+begin
+  // fldigi: void rtty::reset_filters()
+  FMarkFilt.Free;
+  FMarkFilt := TFftFilt.Create(RttyFiltLenTable[FBaudIndex]);
+  FMarkFilt.RttyFilter(FBaud / SampleRate);
+
+  FSpaceFilt.Free;
+  FSpaceFilt := TFftFilt.Create(RttyFiltLenTable[FBaudIndex]);
+  FSpaceFilt.RttyFilter(FBaud / SampleRate);
 end;
 
 procedure TRttyModem.TxInit;
@@ -312,6 +378,7 @@ procedure TRttyModem.SetBaudIndex(AIndex: Integer);
 begin
   if (AIndex >= 0) and (AIndex <= High(RttyBaudTable)) then
   begin
+    FBaudIndex := AIndex;
     FBaud := RttyBaudTable[AIndex];
     ApplyBaudSettings;
   end;
@@ -346,12 +413,12 @@ end;
 
 procedure TRttyModem.SetUnshiftOnSpaceTx(AOn: Boolean);
 begin
-  UOSTx := AOn;
+  FUosTx := AOn;
 end;
 
 procedure TRttyModem.SetUnshiftOnSpaceRx(AOn: Boolean);
 begin
-  UOSRx := AOn;
+  FUosRx := AOn;
 end;
 
 { ---- 受信 DSP ---- }
@@ -407,6 +474,67 @@ begin
     Result := Data;
 end;
 
+function TRttyModem.SpeculativeDecode(AData: Integer): Integer;
+{ 「もしビットが違っていたら何の文字だったか」を試す仮復号。
+
+  BaudotDec は文字シフト/数字シフトの状態 (FRxMode) を書き換える。
+  仮復号でそれを動かしてしまうと、あり得たかもしれない候補の副作用で
+  本物のシフト状態が壊れ、以降の数字が文字として出てくる。
+  実際にこれで "12345" が "WERT" になった (Baudot では 2=W,3=E,4=R,5=T)。
+  仮の計算なので、状態は必ず元に戻す。 }
+var
+  savedMode, savedData: Integer;
+begin
+  savedMode := FRxMode;
+  savedData := FRxData;
+  try
+    FRxData := AData;
+    Result := DecodeChar;
+  finally
+    FRxData := savedData;
+    FRxMode := savedMode;
+  end;
+end;
+
+procedure TRttyModem.EmitDecodedChar(ACh: Integer);
+var
+  ev: TDecodeEvidence;
+  i, dataBits, altCh: Integer;
+  weakest: Integer;
+  weakestMargin: Double;
+begin
+  dataBits := FBits;
+  weakest := -1;
+  weakestMargin := 1.0;
+  for i := 0 to dataBits - 1 do
+    if FDataMargin[i] < weakestMargin then
+    begin
+      weakestMargin := FDataMargin[i];
+      weakest := i;
+    end;
+
+  ev := ScoredCandidateEvidence(ACh, weakestMargin, emkSoftMargin, DecoderName);
+  ev.HasSnr := True;
+  ev.SnrDb := FLastSnrDb;
+  ev.HasFreqOffset := True;
+  ev.FreqOffsetHz := FFreqErr;
+  ev.SamplePos := FSamplePos;
+
+  { 最も弱いビットを反転した文字を第2候補にする。
+    余裕が十分ある (= 判定が明確) ときは候補を増やさない。
+    増やしても選ばれないうえ、Phase 4 の補正候補提示が
+    雑音だらけになるため。 }
+  if (weakest >= 0) and (weakestMargin < ALT_CANDIDATE_MARGIN) then
+  begin
+    altCh := SpeculativeDecode(FRxData xor (1 shl weakest));
+    if (altCh <> 0) and (altCh <> ACh) then
+      { 第2候補の尺度は「反転してしまった側」なので符号を反転して渡す }
+      AddCandidate(ev, altCh, -weakestMargin);
+  end;
+
+  EmitDecode(ev);
+end;
+
 function TRttyModem.RxBit(ABit: Boolean): Boolean;
 var
   i, Correction, C: Integer;
@@ -416,8 +544,12 @@ begin
   Result := False;
 
   for i := 1 to FSymbolLen - 1 do
+  begin
     FBitBuf[i-1] := FBitBuf[i];
+    FMarginBuf[i-1] := FMarginBuf[i];
+  end;
   FBitBuf[FSymbolLen - 1] := ABit;
+  FMarginBuf[FSymbolLen - 1] := FLastMargin;
 
   case FRxState of
     rrsIdle:
@@ -438,6 +570,8 @@ begin
             FCounter := FSymbolLen;
             FBitCntr := 0;
             FRxData := 0;
+            for i := 0 to High(FDataMargin) do
+              FDataMargin[i] := 0;
           end
           else
             FRxState := rrsIdle;
@@ -455,6 +589,10 @@ begin
         begin
           if IsMark then
             FRxData := FRxData or (1 shl FBitCntr);
+          { このビットの判定余裕を記録する。IsMark と同じ位置
+            (シンボル中央) の値を使う。 }
+          if FBitCntr <= High(FDataMargin) then
+            FDataMargin[FBitCntr] := Abs(FMarginBuf[FSymbolLen div 2]);
           Inc(FBitCntr);
           FCounter := FSymbolLen;
         end;
@@ -478,7 +616,7 @@ begin
               else if (C = 10) and (FLastChar = 10) then
                 // 抑制
               else
-                EmitRxChar(C);
+                EmitDecodedChar(C);
               FLastChar := C;
             end;
             Result := True;
@@ -505,13 +643,14 @@ begin
     Snr := 10 * Log10(FSigPwr / FNoisePwr)
   else
     Snr := 0;
+  FLastSnrDb := Snr;   { Evidence へ載せるため保持する }
   SetMetric(ClampF(Snr * 5.0, 0.0, 100.0));
 end;
 
-function TRttyModem.RxProcess(const ABuf: array of Double; ALen: Integer): Integer;
+procedure TRttyModem.ProcessFilteredSample(const AZMark, AZSpace: TComplex);
+{ fldigi: rtty::rx_process() の `for (int i = 0; i < n_out; i++)` ループの
+  本体 (フィルタ出力1サンプル分の包絡線検波~AFCまで)。 }
 var
-  i: Integer;
-  Sample, ZMark, ZSpace: TComplex;
   MarkMag, SpaceMag: Double;
   MClipped, SClipped: Double;
   V3: Double;
@@ -519,81 +658,105 @@ var
   Mp0, Mp1: Integer;
   Ferr: Double;
   AfcSpeedDiv: Integer;
+  MarginDenom: Double;
+begin
+  MarkMag := CplxAbs(AZMark);
+  FMarkEnv := DecayAvg(FMarkEnv, MarkMag, IfThen(MarkMag > FMarkEnv, FSymbolLen div 4, FSymbolLen * 16));
+  FMarkNoise := DecayAvg(FMarkNoise, MarkMag, IfThen(MarkMag < FMarkNoise, FSymbolLen div 4, FSymbolLen * 48));
+
+  SpaceMag := CplxAbs(AZSpace);
+  FSpaceEnv := DecayAvg(FSpaceEnv, SpaceMag, IfThen(SpaceMag > FSpaceEnv, FSymbolLen div 4, FSymbolLen * 16));
+  FSpaceNoise := DecayAvg(FSpaceNoise, SpaceMag, IfThen(SpaceMag < FSpaceNoise, FSymbolLen div 4, FSymbolLen * 48));
+
+  FNoiseFloor := Min(FSpaceNoise, FMarkNoise);
+
+  MClipped := IfThen(MarkMag > FMarkEnv, FMarkEnv, MarkMag);
+  SClipped := IfThen(SpaceMag > FSpaceEnv, FSpaceEnv, SpaceMag);
+  if MClipped < FNoiseFloor then MClipped := FNoiseFloor;
+  if SClipped < FNoiseFloor then SClipped := FNoiseFloor;
+
+  // fldigi: Optimal ATC (Automatic Threshold Correction)
+  V3 := (MClipped - FNoiseFloor) * (FMarkEnv - FNoiseFloor) -
+        (SClipped - FNoiseFloor) * (FSpaceEnv - FNoiseFloor) - 0.25 * (
+        Sqr(FMarkEnv - FNoiseFloor) - Sqr(FSpaceEnv - FNoiseFloor));
+
+  Bit := V3 > 0;
+  FBit := Bit;
+
+  { 軟判定の余裕。V3 は「振幅の2乗」の次元なので、包絡線エネルギーで
+    割ると無次元になる。0 が判定境界、±1 が「完全に振り切った」状態。 }
+  MarginDenom := Sqr(FMarkEnv - FNoiseFloor) + Sqr(FSpaceEnv - FNoiseFloor);
+  if MarginDenom > 1e-12 then
+    FLastMargin := ClampF(V3 / MarginDenom, -1.0, 1.0)
+  else
+    FLastMargin := 0;
+
+  FMarkHistory[FInpPtr] := AZMark;
+  FSpaceHistory[FInpPtr] := AZSpace;
+  FInpPtr := (FInpPtr + 1) mod RTTY_MAXPIPE;
+
+  // fldigi: rx( reverse ? !bit : bit )
+  RxBitValue := Bit;
+  if Reverse then
+    RxBitValue := not RxBitValue;
+
+  if RxBit(RxBitValue) then
+  begin
+    // fldigi: AFC 周波数誤差の算出。直近2サンプルの mark(または space,
+    // reverse時)履歴の位相差から周波数誤差を求める (rtty.cxx 830-850行目)。
+    Mp0 := FInpPtr - 2;
+    Mp1 := Mp0 + 1;
+    if Mp0 < 0 then Mp0 := Mp0 + RTTY_MAXPIPE;
+    if Mp1 < 0 then Mp1 := Mp1 + RTTY_MAXPIPE;
+
+    if not Reverse then
+      Ferr := (TWOPI * SampleRate / FBaud) *
+               CplxArg(CplxConj(FMarkHistory[Mp1]) * FMarkHistory[Mp0])
+    else
+      Ferr := (TWOPI * SampleRate / FBaud) *
+               CplxArg(CplxConj(FSpaceHistory[Mp1]) * FSpaceHistory[Mp0]);
+
+    if Abs(Ferr) > FBaud / 2 then
+      Ferr := 0;
+
+    case FAfcSpeed of
+      0: AfcSpeedDiv := 8;
+      1: AfcSpeedDiv := 4;
+    else
+      AfcSpeedDiv := 1;
+    end;
+    FFreqErr := DecayAvg(FFreqErr, Ferr / 8, AfcSpeedDiv);
+
+    if FAfcOn then
+      SetFreq(Frequency - FFreqErr);
+  end;
+end;
+
+function TRttyModem.RxProcess(const ABuf: array of Double; ALen: Integer): Integer;
+{ fldigi: rtty::rx_process(). mark_filt/space_filt は同じ flen で同期して
+  処理されるため、mark_filt の戻り値は捨て、space_filt の戻り値 (n_out)
+  だけでブロック出力の有無・サンプル数を判定する (fldigi と同じ)。 }
+var
+  i, j, nOut: Integer;
+  Sample, ZMark, ZSpace: TComplex;
+  MarkOut, SpaceOut: TComplexArray;
 begin
   ComputeMetric;
+  { Replay / 再現のために通算サンプル位置を進める (X-06 の下地)。 }
+  Inc(FSamplePos, ALen);
 
   for i := 0 to ALen - 1 do
   begin
     Sample := CplxMake(ABuf[i], ABuf[i]);
 
     ZMark := Mixer(FMarkPhase, Frequency + FShift / 2.0, Sample);
-    ZMark := FMarkFilt.Run(ZMark);
+    FMarkFilt.Run(ZMark, MarkOut);
 
     ZSpace := Mixer(FSpacePhase, Frequency - FShift / 2.0, Sample);
-    ZSpace := FSpaceFilt.Run(ZSpace);
+    nOut := FSpaceFilt.Run(ZSpace, SpaceOut);
 
-    MarkMag := CplxAbs(ZMark);
-    FMarkEnv := DecayAvg(FMarkEnv, MarkMag, IfThen(MarkMag > FMarkEnv, FSymbolLen div 4, FSymbolLen * 16));
-    FMarkNoise := DecayAvg(FMarkNoise, MarkMag, IfThen(MarkMag < FMarkNoise, FSymbolLen div 4, FSymbolLen * 48));
-
-    SpaceMag := CplxAbs(ZSpace);
-    FSpaceEnv := DecayAvg(FSpaceEnv, SpaceMag, IfThen(SpaceMag > FSpaceEnv, FSymbolLen div 4, FSymbolLen * 16));
-    FSpaceNoise := DecayAvg(FSpaceNoise, SpaceMag, IfThen(SpaceMag < FSpaceNoise, FSymbolLen div 4, FSymbolLen * 48));
-
-    FNoiseFloor := Min(FSpaceNoise, FMarkNoise);
-
-    MClipped := IfThen(MarkMag > FMarkEnv, FMarkEnv, MarkMag);
-    SClipped := IfThen(SpaceMag > FSpaceEnv, FSpaceEnv, SpaceMag);
-    if MClipped < FNoiseFloor then MClipped := FNoiseFloor;
-    if SClipped < FNoiseFloor then SClipped := FNoiseFloor;
-
-    // fldigi: Optimal ATC (Automatic Threshold Correction)
-    V3 := (MClipped - FNoiseFloor) * (FMarkEnv - FNoiseFloor) -
-          (SClipped - FNoiseFloor) * (FSpaceEnv - FNoiseFloor) - 0.25 * (
-          Sqr(FMarkEnv - FNoiseFloor) - Sqr(FSpaceEnv - FNoiseFloor));
-
-    Bit := V3 > 0;
-    FBit := Bit;
-
-    FMarkHistory[FInpPtr] := ZMark;
-    FSpaceHistory[FInpPtr] := ZSpace;
-    FInpPtr := (FInpPtr + 1) mod RTTY_MAXPIPE;
-
-    // fldigi: rx( reverse ? !bit : bit )
-    RxBitValue := Bit;
-    if Reverse then
-      RxBitValue := not RxBitValue;
-
-    if RxBit(RxBitValue) then
-    begin
-      // fldigi: AFC 周波数誤差の算出。直近2サンプルの mark(または space,
-      // reverse時)履歴の位相差から周波数誤差を求める (rtty.cxx 830-850行目)。
-      Mp0 := FInpPtr - 2;
-      Mp1 := Mp0 + 1;
-      if Mp0 < 0 then Mp0 := Mp0 + RTTY_MAXPIPE;
-      if Mp1 < 0 then Mp1 := Mp1 + RTTY_MAXPIPE;
-
-      if not Reverse then
-        Ferr := (TWOPI * SampleRate / FBaud) *
-                 CplxArg(CplxConj(FMarkHistory[Mp1]) * FMarkHistory[Mp0])
-      else
-        Ferr := (TWOPI * SampleRate / FBaud) *
-                 CplxArg(CplxConj(FSpaceHistory[Mp1]) * FSpaceHistory[Mp0]);
-
-      if Abs(Ferr) > FBaud / 2 then
-        Ferr := 0;
-
-      case FAfcSpeed of
-        0: AfcSpeedDiv := 8;
-        1: AfcSpeedDiv := 4;
-      else
-        AfcSpeedDiv := 1;
-      end;
-      FFreqErr := DecayAvg(FFreqErr, Ferr / 8, AfcSpeedDiv);
-
-      if FAfcOn then
-        SetFreq(Frequency - FFreqErr);
-    end;
+    for j := 0 to nOut - 1 do
+      ProcessFilteredSample(MarkOut[j], SpaceOut[j]);
   end;
   Result := 0;
 end;
@@ -611,7 +774,6 @@ end;
 
 procedure TRttyModem.SendSymbol(ASymbol: Integer; ALen: Integer; ASoundOut: Boolean);
 var
-  Buf: array of Double;
   i: Integer;
   Freq: Double;
   Sym: Integer;
@@ -629,10 +791,10 @@ begin
 
   if ASoundOut and Assigned(Sound) then
   begin
-    SetLength(Buf, ALen);
+    EnsureTxBuf(ALen);   // X-04: 通常は既に足りていて何もしない
     for i := 0 to ALen - 1 do
-      Buf[i] := Nco(Freq);
-    Sound.WriteSamples(Buf, ALen);
+      FTxSymbolBuf[i] := Nco(Freq);
+    Sound.WriteSamples(FTxSymbolBuf, ALen);
   end
   else
     for i := 0 to ALen - 1 do
@@ -688,7 +850,7 @@ begin
     $1B: FRxMode := RTTY_FIGURES;
     $04:
       begin
-        if UOSRx then
+        if FUosRx then
           FRxMode := RTTY_LETTERS;
         Exit(' ');
       end;
@@ -817,7 +979,7 @@ begin
   // unshift-on-space
   if C = Ord(' ') then
   begin
-    if UOSTx then
+    if FUosTx then
     begin
       SendChar(RTTY_LETTERS);
       SendChar($04);

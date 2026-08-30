@@ -73,6 +73,9 @@ uses
   Classes, SysUtils, StrUtils, Generics.Collections;
 
 type
+  { cty.dat の読み込み・参照に関するエラー (添字の範囲外など)。 }
+  EDxccError = class(Exception);
+
   { TDxccEntry
     ---------------------------------------------------------------------
     fldigi: struct dxcc (dxcc.h) に相当。1個のDXCCエンティティ (または
@@ -455,6 +458,10 @@ end;
 
 function TDxccDatabase.Entity(AIndex: Integer): TDxccEntry;
 begin
+  if (AIndex < 0) or (AIndex >= FBaseEntities.Count) then
+    raise EDxccError.CreateFmt(
+      'DXCCエンティティの番号が範囲外です: %d (件数 %d)',
+      [AIndex, FBaseEntities.Count]);
   Result := FBaseEntities[AIndex];
 end;
 

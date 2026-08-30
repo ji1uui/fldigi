@@ -65,6 +65,13 @@ type
     procedure DoFreqChanged(F: Double);
     procedure DoModeChanged(const M: string; W: Integer);
     procedure DoError(const Msg: string);
+    { ハンドラの代入もロック下で行う (発火側と対にしないと保護にならない)。 }
+    procedure SetOnFreqChanged(AValue: TRigFreqEvent);
+    procedure SetOnModeChanged(AValue: TRigModeEvent);
+    procedure SetOnError(AValue: TRigPollErrorEvent);
+    { Terminated を見ながら細かく刻んで待つ (長いポーリング間隔でも
+      破棄が即座に効くようにする)。 }
+    procedure InterruptibleSleep(AMs: Integer);
   protected
     procedure Execute; override;
   public
@@ -79,9 +86,9 @@ type
     { fldigi: valHamRigPollrate->value() (ミリ秒単位) }
     property PollIntervalMs: Integer read FPollIntervalMs write FPollIntervalMs;
 
-    property OnFreqChanged: TRigFreqEvent read FOnFreqChanged write FOnFreqChanged;
-    property OnModeChanged: TRigModeEvent read FOnModeChanged write FOnModeChanged;
-    property OnError: TRigPollErrorEvent read FOnError write FOnError;
+    property OnFreqChanged: TRigFreqEvent read FOnFreqChanged write SetOnFreqChanged;
+    property OnModeChanged: TRigModeEvent read FOnModeChanged write SetOnModeChanged;
+    property OnError: TRigPollErrorEvent read FOnError write SetOnError;
   end;
 
 implementation
@@ -102,9 +109,23 @@ begin
 end;
 
 destructor TRigPollThread.Destroy;
+{ RIG-01: 以前は FLock.Free を先に行っていたため、まだ走っている
+  ポーリングスレッドが解放済みのクリティカルセクションやイベントを
+  触りえた (inherited Destroy が Terminate/WaitFor を行うのはその "後")。
+  正しい順序は「終了要求 → スレッド停止を待つ → 資源解放」。 }
 begin
-  FLock.Free;
-  inherited Destroy;
+  Terminate;
+  { 購読を外し、停止途中にフォーム側コールバックが呼ばれないようにする。 }
+  FLock.Enter;
+  try
+    FOnFreqChanged := nil;
+    FOnModeChanged := nil;
+    FOnError := nil;
+  finally
+    FLock.Leave;
+  end;
+  inherited Destroy;  // ここで Terminate / Resume / WaitFor が行われる
+  FLock.Free;         // スレッド停止が確定してから解放する
 end;
 
 function TRigPollThread.GetBypass: Boolean;
@@ -127,22 +148,107 @@ begin
   end;
 end;
 
+{ RIG-01: Destroy はハンドラをロック下で nil にするが、発火側がロックを
+  取らずに読んでいては保護にならない。しかもメソッドポインタはコード部と
+  データ部の2ワードあり代入がアトミックではないため、ちぎれた値
+  ("コードは旧・データは nil") を読んで飛ぶ危険がある。
+  ロック下で写し取り、呼び出し自体はロック外で行う
+  (ハンドラがこのスレッドを呼び返してもデッドロックしないように)。 }
 procedure TRigPollThread.DoFreqChanged(F: Double);
+var
+  h: TRigFreqEvent;
 begin
-  if Assigned(FOnFreqChanged) then
-    FOnFreqChanged(Self, F);
+  FLock.Enter;
+  try
+    h := FOnFreqChanged;
+  finally
+    FLock.Leave;
+  end;
+  if Assigned(h) then
+    h(Self, F);
 end;
 
 procedure TRigPollThread.DoModeChanged(const M: string; W: Integer);
+var
+  h: TRigModeEvent;
 begin
-  if Assigned(FOnModeChanged) then
-    FOnModeChanged(Self, M, W);
+  FLock.Enter;
+  try
+    h := FOnModeChanged;
+  finally
+    FLock.Leave;
+  end;
+  if Assigned(h) then
+    h(Self, M, W);
 end;
 
 procedure TRigPollThread.DoError(const Msg: string);
+var
+  h: TRigPollErrorEvent;
 begin
-  if Assigned(FOnError) then
-    FOnError(Self, Msg);
+  FLock.Enter;
+  try
+    h := FOnError;
+  finally
+    FLock.Leave;
+  end;
+  if Assigned(h) then
+    h(Self, Msg);
+end;
+
+procedure TRigPollThread.SetOnFreqChanged(AValue: TRigFreqEvent);
+begin
+  FLock.Enter;
+  try
+    FOnFreqChanged := AValue;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TRigPollThread.SetOnModeChanged(AValue: TRigModeEvent);
+begin
+  FLock.Enter;
+  try
+    FOnModeChanged := AValue;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TRigPollThread.SetOnError(AValue: TRigPollErrorEvent);
+begin
+  FLock.Enter;
+  try
+    FOnError := AValue;
+  finally
+    FLock.Leave;
+  end;
+end;
+
+procedure TRigPollThread.InterruptibleSleep(AMs: Integer);
+{ RIG-01: ポーリング間隔をそのまま Sleep していたため、間隔を長くすると
+  (例: 5秒) Destroy の WaitFor がその分ブロックし、アプリ終了が固まった。
+  細かく刻んで Terminated を見る。 }
+const
+  SLICE_MS = 20;
+var
+  remain: Integer;
+begin
+  remain := AMs;
+  while (remain > 0) and (not Terminated) do
+  begin
+    if remain > SLICE_MS then
+    begin
+      Sleep(SLICE_MS);
+      Dec(remain, SLICE_MS);
+    end
+    else
+    begin
+      Sleep(remain);
+      remain := 0;
+    end;
+  end;
 end;
 
 procedure TRigPollThread.Execute;
@@ -160,7 +266,7 @@ begin
   begin
     intervalMs := FPollIntervalMs;
     if intervalMs < 10 then intervalMs := 10;
-    Sleep(intervalMs);
+    InterruptibleSleep(intervalMs);
 
     if Terminated then Break;
     if (FRig = nil) or not FRig.IsOnLine then Continue;

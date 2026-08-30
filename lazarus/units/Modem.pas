@@ -40,7 +40,7 @@ unit Modem;
 interface
 
 uses
-  Classes, SysUtils, SoundIntf, ModemTypes;
+  Classes, SysUtils, SoundIntf, ModemTypes, DecodeEvidence;
 
 const
   { fldigi: modem.h の GET_TX_CHAR_* 相当 (fl_digi.h) }
@@ -56,7 +56,14 @@ type
   TGetTxCharEvent = function(Sender: TCustomModem): Integer of object;
 
   { fldigi: put_rx_char() 相当。受信復調された1文字を上位へ渡す }
-  TPutRxCharEvent = procedure(Sender: TCustomModem; ACh: Integer) of object;
+  { ADR-002: 復調結果は「確定した1文字」ではなく、候補と根拠 (Evidence) を
+    まとめた TDecodeEvidence で渡す。
+    軟判定を持たない復調器は候補1件・尺度なしで出せばよく、
+    持つ復調器は第2候補や余裕を載せられる。
+    型を今のうちに広げておかないと、復調器が増えてから全部を
+    書き換えることになる (Phase 0 で固定する理由)。 }
+  TDecodeEvent = procedure(Sender: TCustomModem;
+    const AEvidence: TDecodeEvidence) of object;
 
   { fldigi: put_echo_char() 相当。"今まさに送信中の文字" を Tx パネルへ
     エコー表示するためのコールバック。put_rx_char (受信パネル表示) とは
@@ -102,7 +109,7 @@ type
     FCwXmtWPM: Double;
 
     FOnGetTxChar: TGetTxCharEvent;
-    FOnPutRxChar: TPutRxCharEvent;
+    FOnDecode: TDecodeEvent;
     FOnEchoChar: TEchoCharEvent;
     FOnFrequencyChanged: TFrequencyEvent;
     FOnMetricChanged: TMetricEvent;
@@ -116,9 +123,31 @@ type
       本移植版では常に通知イベントも発火する (呼び出し側で頻度を制御する)。 }
     procedure SetMetric(AValue: Double); virtual;
 
-    { 派生クラスから受信文字を上位に渡すためのヘルパ。
-      fldigi: put_rx_char(c) 呼び出しに相当。 }
+    { --- X-04: 送信シンボルの波形バッファ ---
+      送信は「1シンボルぶんの波形を作ってサウンドへ渡す」の繰り返しで、
+      RTTY 45baud なら毎秒 45 回、CW なら要素ごとに走る。
+      派生クラスがそのたびにローカルの動的配列を SetLength していたため、
+      送信中ずっと確保と解放が続いていた。FPC のメモリマネージャは
+      ロックを取るので、これは realtime 経路の deadline を脅かす
+      (v1.1 X-04 / Z-04)。基底クラスで一度だけ確保して使い回す。
+
+      【前提】1つのモデムインスタンスの送信は単一スレッドから行う
+      (ModemEngine が TxLoopStep を1本のワーカーで回す設計)。 }
+  protected
+    FTxSymbolBuf: array of Double;
+  protected
+    { 必要量を満たすまで伸ばす (縮めない)。 }
+    procedure EnsureTxBuf(ANeeded: Integer);
+
+    { 派生クラスから復調結果を上位へ渡す唯一の経路。
+      fldigi: put_rx_char(c) に相当するが、運ぶのは文字ではなく Evidence。 }
+    procedure EmitDecode(const AEvidence: TDecodeEvidence);
+
+    { 軟判定を持たない復調器向けの簡易版。内部で候補1件・尺度なしの
+      Evidence を組み立てて EmitDecode に渡す。 }
     procedure EmitRxChar(ACh: Integer);
+
+
 
     { 派生クラスから「送信中」の文字を上位(Txパネル)へエコー表示する
       ためのヘルパ。fldigi: put_echo_char(c) 呼び出しに相当。 }
@@ -222,7 +251,14 @@ type
       GUI 層と接続するためのイベント (fldigi の REQ(...) 呼び出しに相当)
       -------------------------------------------------------------------- }
     property OnGetTxChar: TGetTxCharEvent read FOnGetTxChar write FOnGetTxChar;
-    property OnPutRxChar: TPutRxCharEvent read FOnPutRxChar write FOnPutRxChar;
+    { 復調器が名乗る戦略名 (Evidence の DecoderName に入る)。
+      Phase 3 で複数戦略を並列評価する際、どの戦略の出力かを
+      識別するために使う。既定はモード名。
+      公開しているのは、上位が「どの戦略が有効だったか」を
+      集計・表示・記録する必要があるため (Z-01 Observability)。 }
+    function DecoderName: string; virtual;
+
+    property OnDecode: TDecodeEvent read FOnDecode write FOnDecode;
     property OnEchoChar: TEchoCharEvent read FOnEchoChar write FOnEchoChar;
     property OnFrequencyChanged: TFrequencyEvent read FOnFrequencyChanged write FOnFrequencyChanged;
     property OnMetricChanged: TMetricEvent read FOnMetricChanged write FOnMetricChanged;
@@ -347,10 +383,26 @@ begin
   FCwXmtWPM := AValue;
 end;
 
+procedure TCustomModem.EnsureTxBuf(ANeeded: Integer);
+begin
+  if Length(FTxSymbolBuf) < ANeeded then
+    SetLength(FTxSymbolBuf, ANeeded);
+end;
+
+procedure TCustomModem.EmitDecode(const AEvidence: TDecodeEvidence);
+begin
+  if Assigned(FOnDecode) then
+    FOnDecode(Self, AEvidence);
+end;
+
 procedure TCustomModem.EmitRxChar(ACh: Integer);
 begin
-  if Assigned(FOnPutRxChar) then
-    FOnPutRxChar(Self, ACh);
+  EmitDecode(SingleCandidateEvidence(ACh, DecoderName));
+end;
+
+function TCustomModem.DecoderName: string;
+begin
+  Result := GetModeName;
 end;
 
 procedure TCustomModem.EmitEchoChar(ACh: Integer);

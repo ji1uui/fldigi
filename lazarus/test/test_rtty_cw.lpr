@@ -18,8 +18,21 @@ uses
   cthreads,
   {$ENDIF}
   Classes, SysUtils,
-  SoundIntf, ModemTypes, Modem, ModemDSP, MorseTable,
-  RttyModemImpl, CwModemImpl;
+  SoundIntf, ModemTypes, Modem, ModemDSP, DecodeEvidence, MorseTable, TestSupport,
+  RttyModemImpl, CwModemImpl, Requirements;
+
+{ この試験は [NG] を印字しても終了コードを 0 のままにしていた。
+  run_tests.sh は [NG] を grep するので battery では捕まっていたが、
+  binary を直接動かした側 (CI など) は失敗に気づけない。数えて返す。 }
+var
+  FailCount: Integer = 0;
+
+procedure Fail(const AMsg: string);
+begin
+  Inc(FailCount);
+  WriteLn('  [NG] ', AMsg);
+end;
+
 
 type
   TDoubleArray = array of Double;
@@ -27,132 +40,44 @@ type
   { TCaptureSoundDevice
     送信された波形サンプルをすべて内部バッファに蓄積するだけの
     テスト用サウンドデバイス。ReadSamples は無音(0.0)を返す。 }
-  TCaptureSoundDevice = class(TCustomSoundDevice)
-  private
-    FCaptured: array of Double;
-    FCount: Integer;
-    procedure EnsureCapacity(AExtra: Integer);
-  public
-    constructor Create; override;
-    function Open(Direction: TSoundDirection; ASampleRate: Integer): Boolean; override;
-    procedure Close; override;
-    procedure AbortIO; override;
-    function ReadSamples(var Buf: array of Double; Count: Integer): Integer; override;
-    function WriteSamples(const Buf: array of Double; Count: Integer): Integer; override;
-    function WriteStereo(const BufL, BufR: array of Double; Count: Integer): Integer; override;
-    procedure Flush; override;
-
-    function GetCapturedCopy: TDoubleArray;
-
-    property Count: Integer read FCount;
-  end;
-
-constructor TCaptureSoundDevice.Create;
-begin
-  inherited Create;
-  FCount := 0;
-  SetLength(FCaptured, 0);
-end;
-
-procedure TCaptureSoundDevice.EnsureCapacity(AExtra: Integer);
-begin
-  if FCount + AExtra > Length(FCaptured) then
-    SetLength(FCaptured, (FCount + AExtra) * 2 + 1024);
-end;
-
-function TCaptureSoundDevice.Open(Direction: TSoundDirection; ASampleRate: Integer): Boolean;
-begin
-  Result := True;
-end;
-
-procedure TCaptureSoundDevice.Close;
-begin
-end;
-
-procedure TCaptureSoundDevice.AbortIO;
-begin
-end;
-
-function TCaptureSoundDevice.ReadSamples(var Buf: array of Double; Count: Integer): Integer;
-var
-  i: Integer;
-begin
-  for i := 0 to Count - 1 do
-    Buf[i] := 0.0;
-  Result := Count;
-end;
-
-function TCaptureSoundDevice.WriteSamples(const Buf: array of Double; Count: Integer): Integer;
-var
-  i: Integer;
-begin
-  EnsureCapacity(Count);
-  for i := 0 to Count - 1 do
-  begin
-    FCaptured[FCount] := Buf[i];
-    Inc(FCount);
-  end;
-  Result := Count;
-end;
-
-function TCaptureSoundDevice.WriteStereo(const BufL, BufR: array of Double; Count: Integer): Integer;
-begin
-  Result := WriteSamples(BufL, Count);
-end;
-
-procedure TCaptureSoundDevice.Flush;
-begin
-end;
-
-function TCaptureSoundDevice.GetCapturedCopy: TDoubleArray;
-var
-  i: Integer;
-begin
-  SetLength(Result, FCount);
-  for i := 0 to FCount - 1 do
-    Result[i] := FCaptured[i];
-end;
-
-{ ---- テスト駆動用のヘルパ (get_tx_char / put_rx_char 相当) ---- }
-
-type
-  TTxSource = class
-  private
-    FText: string;
-    FPos: Integer;
-  public
-    constructor Create(const AText: string);
-    function GetTxChar(Sender: TCustomModem): Integer;
-  end;
-
-constructor TTxSource.Create(const AText: string);
-begin
-  FText := AText;
-  FPos := 1;
-end;
-
-function TTxSource.GetTxChar(Sender: TCustomModem): Integer;
-begin
-  if FPos <= Length(FText) then
-  begin
-    Result := Ord(FText[FPos]);
-    Inc(FPos);
-  end
-  else
-    Result := MODEM_TX_CHAR_ETX;
-end;
-
-type
   TRxSink = class
   private
     FText: string;
+    FAltCount: Integer;
+    FScoredCount: Integer;
+    FMinMargin: Double;
   public
-    procedure PutRxChar(Sender: TCustomModem; ACh: Integer);
+    constructor Create;
+    { ADR-002: 復調結果は Evidence で届く。表示には最有力候補を使い、
+      第2候補と軟判定余裕は別に集計して、型が実際に値を運んでいることを
+      確かめる。 }
+    procedure Decode(Sender: TCustomModem; const AEvidence: TDecodeEvidence);
     property Text: string read FText;
+    property AltCount: Integer read FAltCount;
+    property ScoredCount: Integer read FScoredCount;
+    property MinMargin: Double read FMinMargin;
   end;
 
-procedure TRxSink.PutRxChar(Sender: TCustomModem; ACh: Integer);
+constructor TRxSink.Create;
 begin
+  inherited Create;
+  FMinMargin := 1.0;
+end;
+
+procedure TRxSink.Decode(Sender: TCustomModem; const AEvidence: TDecodeEvidence);
+var
+  ACh: Integer;
+begin
+  ACh := AEvidence.BestChar;
+  if ACh = DECODE_NO_CHAR then Exit;
+  if AEvidence.HasAlternatives then
+    Inc(FAltCount);
+  if AEvidence.MetricKind <> emkNone then
+  begin
+    Inc(FScoredCount);
+    if AEvidence.BestMetric < FMinMargin then
+      FMinMargin := AEvidence.BestMetric;
+  end;
   if (ACh >= 32) and (ACh < 127) then
     FText := FText + Chr(ACh)
   else if ACh = 13 then
@@ -193,7 +118,7 @@ begin
   TxSrc := TTxSource.Create(TestMsg);
   RxSink := TRxSink.Create;
   TxModem.OnGetTxChar := @TxSrc.GetTxChar;
-  RxModem.OnPutRxChar := @RxSink.PutRxChar;
+  RxModem.OnDecode := @RxSink.Decode;
 
   TxModem.TxInit;
 
@@ -208,12 +133,20 @@ begin
   RxModem.RxProcess(TxSound.GetCapturedCopy, TxSound.Count);
 
   WriteLn('  復調結果      : ', RxSink.Text);
+  { ADR-002 の実効確認: 型が「運べる」だけでなく、RTTY が実際に
+    軟判定の値を載せていること。載せていなければ ScoredCount が 0 になる。 }
+  WriteLn(Format('  Evidence      : 尺度つき %d 文字 / 第2候補あり %d 文字 / 最小余裕 %.3f',
+    [RxSink.ScoredCount, RxSink.AltCount, RxSink.MinMargin]));
+  if RxSink.ScoredCount > 0 then
+    WriteLn('  [OK] RTTY が軟判定の余裕を Evidence として出している (ADR-002)')
+  else
+    Fail('Evidence に尺度が載っていない (ADR-002)');
 
   Passed := Pos(TestMsg, RxSink.Text) > 0;
   if Passed then
     WriteLn('  [OK] 送信文字列が復調結果に含まれている')
   else
-    WriteLn('  [NG] 送信文字列が復調結果に見つからない!');
+    Fail('送信文字列が復調結果に見つからない!');
 
   TxModem.Free;
   RxModem.Free;
@@ -261,7 +194,7 @@ begin
   TxSrc := TTxSource.Create(TestMsg);
   RxSink := TRxSink.Create;
   TxModem.OnGetTxChar := @TxSrc.GetTxChar;
-  RxModem.OnPutRxChar := @RxSink.PutRxChar;
+  RxModem.OnDecode := @RxSink.Decode;
 
   TxModem.TxInit;
 
@@ -297,7 +230,7 @@ begin
   if Passed then
     WriteLn('  [OK] 復調結果に "CQ" が検出された')
   else
-    WriteLn('  [NG] 復調結果に "CQ" が見つからない!');
+    Fail('復調結果に "CQ" が見つからない!');
 
   TxModem.Free;
   RxModem.Free;
@@ -312,5 +245,12 @@ end;
 begin
   RunRttyLoopbackTest;
   RunCwLoopbackTest;
-  WriteLn('=== テスト完了 ===');
+  WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 ===');
+
+  { §18 要求トレーサビリティ: 通ったときだけ被覆を申告する。 }
+  if FailCount = 0 then
+    CoverReq('CMP-002');
+
+  if FailCount > 0 then
+    Halt(1);
 end.

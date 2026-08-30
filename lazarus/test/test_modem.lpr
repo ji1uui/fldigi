@@ -18,7 +18,13 @@ uses
   cthreads,
   {$ENDIF}
   Classes, SysUtils,
-  SoundIntf, ModemTypes, Modem, ModemEngine, ModemUI, NullModemImpl;
+  SoundIntf, ModemTypes, Modem, ModemEngine, ModemUI, DecodeEvidence, NullModemImpl;
+
+{ [NG] を印字しても終了コードが 0 のままだった。数えて返す
+  (run_tests.sh の grep 頼みにしない)。 }
+var
+  GFailCount: Integer = 0;
+
 
 type
   { テスト用の擬似フォーム。TModemUI からのイベントを受けて
@@ -37,7 +43,8 @@ type
     procedure OnFreq(Sender: TModemUI; AFrequency: Double);
     procedure OnMetric(Sender: TModemUI; AMetric: Double);
     procedure OnStatus(Sender: TModemUI; const AText: string);
-    procedure OnRxChar(Sender: TModemUI; ACh: Integer);
+    procedure OnRxChar(Sender: TModemUI; ACh: Integer;
+      AMetricKind: TEvidenceMetricKind; AMetric: Double; AAltCount: Integer);
     procedure OnState(Sender: TModemUI; AState: TTrxState);
     procedure OnError(Sender: TModemUI; const AMsg: string);
     function OnGetTxChar(Sender: TModemUI): Integer;
@@ -61,7 +68,10 @@ procedure TFakeMainForm.OnFreq(Sender: TModemUI; AFrequency: Double);
 begin
   Inc(FFreqCount);
   if ThreadID <> FMainThreadID then
+  begin
+    Inc(GFailCount);
     WriteLn('  [NG] OnFreq がメインスレッド以外で呼ばれた!')
+  end
   else
     WriteLn(Format('  [OK] OnFreq: %.1f Hz (メインスレッドで実行)', [AFrequency]));
 end;
@@ -76,7 +86,8 @@ begin
   WriteLn('  [OK] OnStatus: ' + AText);
 end;
 
-procedure TFakeMainForm.OnRxChar(Sender: TModemUI; ACh: Integer);
+procedure TFakeMainForm.OnRxChar(Sender: TModemUI; ACh: Integer;
+  AMetricKind: TEvidenceMetricKind; AMetric: Double; AAltCount: Integer);
 begin
   WriteLn(Format('  [OK] OnRxChar: %d (%s)', [ACh, Chr(ACh)]));
 end;
@@ -85,7 +96,10 @@ procedure TFakeMainForm.OnState(Sender: TModemUI; AState: TTrxState);
 begin
   Inc(FStateCount);
   if ThreadID <> FMainThreadID then
+  begin
+    Inc(GFailCount);
     WriteLn('  [NG] OnState がメインスレッド以外で呼ばれた!')
+  end
   else
     WriteLn('  [OK] OnState: ' + IntToStr(Ord(AState)) + ' (メインスレッドで実行)');
 end;
@@ -122,6 +136,10 @@ begin
   WriteLn;
 
   Sound := TNullSoundDevice.Create;
+  { 実運用と同じく、エンジンへ渡す前にデバイスを開いておく。
+    (以前は開かずに渡しており、未オープンのデバイスへ読み書きするという
+     契約違反をテストが再現していなかった。) }
+  Sound.Open(sdRead, 8000);
   NullModem := TNullModem.Create(Sound);
   Engine := TModemEngine.Create(Sound, Sound);
   UI := TModemUI.Create;
@@ -182,11 +200,21 @@ begin
 
   WriteLn;
   WriteLn(Format('周波数通知回数 = %d, 状態通知回数 = %d', [Form.FreqCount, Form.StateCount]));
-  WriteLn('=== テスト完了 ===');
+  WriteLn('=== テスト完了: ', GFailCount, ' 件の失敗 ===');
 
-  Engine.Free;
+  { APP-01: 破棄順序を本体 (UnitMainForm.Destroy) と揃える。
+    (1) ワーカースレッドを止める (上の RequestExit/WaitFor で完了済み)
+    (2) UI を破棄する -- DetachEngine のためエンジン本体はまだ生かす
+    (3) エンジン本体を破棄する
+    逆順にすると TModemUI.Destroy -> DetachEngine が解放済みエンジンへ
+    書き込む use-after-free になる。以前のテストはこの順序を再現したまま
+    成功終了していたため、欠陥を見逃していた。 }
   UI.Free;
+  Engine.Free;
   Form.Free;
   NullModem.Free;
   Sound.Free;
+
+  if GFailCount > 0 then
+    Halt(1);
 end.

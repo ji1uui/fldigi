@@ -21,7 +21,7 @@ program test_station_adif;
 uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   SysUtils, Classes, DateUtils, Sockets, BaseUnix,
-  StationInfo, AdifUdpSender, QsoLogbook;
+  StationInfo, AdifUdpSender, QsoLogbook, Requirements;
 
 var
   FailCount: Integer = 0;
@@ -96,6 +96,38 @@ begin
   Check(ExtractFilePath(TStationInfo.DefaultFilePath) =
     ExtractFilePath(ParamStr(0)),
     'DefaultFilePath のディレクトリが実行ファイルと一致する');
+
+  { --- 日本語 (非ASCII) の往復。JSON 保存は正しい UTF-8 で書けるのに
+    読み戻しでだけ '?' に潰れるという壊れ方をするため、ASCII だけの
+    テストでは検出できない。StationInfo.pas の initialization にある
+    SetMultiByteConversionCodePage(CP_UTF8) が効いていることの確認。 --- }
+  path := GetTempDir + 'test_station_ja_' + IntToStr(Random(100000)) + '.json';
+  info := TStationInfo.Create;
+  try
+    info.MyCall := 'JA1ABC/1';
+    info.MyQth := '東京都八王子市';
+    info.MyName := '山田太郎';
+    info.MyAntenna := '自作ダイポール';
+    info.SaveToFile(path);
+  finally
+    info.Free;
+  end;
+
+  info2 := TStationInfo.Create;
+  try
+    info2.LoadFromFile(path);
+    Check(info2.MyQth = '東京都八王子市',
+      '日本語の MyQth が往復する: [' + info2.MyQth + ']');
+    Check(info2.MyName = '山田太郎',
+      '日本語の MyName が往復する: [' + info2.MyName + ']');
+    Check(info2.MyAntenna = '自作ダイポール',
+      '日本語の MyAntenna が往復する: [' + info2.MyAntenna + ']');
+    Check(info2.MyCall = 'JA1ABC/1',
+      'ポータブル指定付きコールサインが往復する: ' + info2.MyCall);
+  finally
+    info2.Free;
+  end;
+  DeleteFile(path);
 end;
 
 { ------------------------------------------------------------------------
@@ -410,6 +442,13 @@ begin
 
   WriteLn;
   WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 (全 ', TestCount, ' 件中) ===');
+  { §18 要求トレーサビリティ: **通ったときだけ** 被覆を申告する。
+    落ちた試験が「検証した」と言ってはならない。 }
+  if FailCount = 0 then
+  begin
+    CoverReq('CMP-001');
+  end;
+
   if FailCount > 0 then
     Halt(1);
 end.

@@ -44,7 +44,7 @@ unit StationInfo;
 interface
 
 uses
-  Classes, SysUtils, fpjson, jsonparser;
+  Classes, SysUtils, fpjson, jsonparser, SafeFileIO;
 
 type
   { TStationInfo
@@ -58,6 +58,11 @@ type
     FMyQth: string;       // 運用地 (QTH)        (fldigi: myQth     / ADIF: MY_CITY)
     FMyLocator: string;   // グリッドロケータ    (fldigi: myLocator / ADIF: MY_GRIDSQUARE)
     FMyAntenna: string;   // アンテナ情報        (fldigi: myAntenna / ADIF: MY_ANTENNA)
+    { OpProfile の TEquipmentSet が解決するのに、ここに受け皿が無かったため
+      TResolvedStation から先へ渡せていなかった項目 (README 9章の既知の制約)。
+      マクロの <MYRIG>/<MYPWR> と ADIF の MY_RIG/TX_PWR の双方で必要になる。 }
+    FMyRig: string;       // リグ                (ADIF: MY_RIG)
+    FMyPowerW: Integer;   // 送信出力[W] 0=未設定 (ADIF: TX_PWR)
   public
     constructor Create;
 
@@ -86,6 +91,8 @@ type
     property MyQth: string read FMyQth write FMyQth;
     property MyLocator: string read FMyLocator write FMyLocator;
     property MyAntenna: string read FMyAntenna write FMyAntenna;
+    property MyRig: string read FMyRig write FMyRig;
+    property MyPowerW: Integer read FMyPowerW write FMyPowerW;
   end;
 
   EStationInfoError = class(Exception);
@@ -101,6 +108,8 @@ const
   KEY_MY_QTH     = 'myQth';
   KEY_MY_LOCATOR = 'myLocator';
   KEY_MY_ANTENNA = 'myAntenna';
+  KEY_MY_RIG     = 'myRig';
+  KEY_MY_POWER_W = 'myPowerW';
 
   DEFAULT_FILE_NAME = 'station_info.json';
 
@@ -115,6 +124,8 @@ begin
   FMyQth := '';
   FMyLocator := '';
   FMyAntenna := '';
+  FMyRig := '';
+  FMyPowerW := 0;
 end;
 
 class function TStationInfo.DefaultFilePath: string;
@@ -156,6 +167,10 @@ begin
       FMyQth     := obj.Get(KEY_MY_QTH, '');
       FMyLocator := obj.Get(KEY_MY_LOCATOR, '');
       FMyAntenna := obj.Get(KEY_MY_ANTENNA, '');
+      { 旧いファイルにはこの2項目が無いので、既定値で補う
+        (キーが無いだけで読み込み全体を失敗させない)。 }
+      FMyRig := obj.Get(KEY_MY_RIG, '');
+      FMyPowerW := obj.Get(KEY_MY_POWER_W, 0);
     finally
       data.Free;
     end;
@@ -167,7 +182,6 @@ end;
 procedure TStationInfo.SaveToFile(const AFileName: string);
 var
   obj: TJSONObject;
-  sl: TStringList;
 begin
   obj := TJSONObject.Create;
   try
@@ -177,14 +191,12 @@ begin
     obj.Add(KEY_MY_QTH, FMyQth);
     obj.Add(KEY_MY_LOCATOR, FMyLocator);
     obj.Add(KEY_MY_ANTENNA, FMyAntenna);
+    obj.Add(KEY_MY_RIG, FMyRig);
+    obj.Add(KEY_MY_POWER_W, FMyPowerW);
 
-    sl := TStringList.Create;
-    try
-      sl.Text := obj.FormatJSON;
-      sl.SaveToFile(AFileName);
-    finally
-      sl.Free;
-    end;
+    { 一時ファイル + rename による原子的保存 (SafeFileIO 参照)。
+      書き込み途中で電源が落ちても局情報が消えない。 }
+    SaveTextAtomic(AFileName, obj.FormatJSON);
   finally
     obj.Free;
   end;
@@ -199,5 +211,24 @@ procedure TStationInfo.SaveDefault;
 begin
   SaveToFile(DefaultFilePath);
 end;
+
+initialization
+  { --- 日本語を含む設定値を JSON 往復で壊さないための必須設定 ---
+    FPC の `string` は AnsiString(CP_ACP) であり、Unix では CP_ACP の実体
+    (DefaultSystemCodePage) が既定で 0 のままになる。この状態で fpjson が
+    内部の UnicodeString から AnsiString へ変換すると、非 ASCII 文字が
+    すべて '?' に潰れる。書き出しは正しい UTF-8 になるため、保存した
+    ファイルを読み直した瞬間にだけ壊れるという分かりにくい壊れ方をする
+    (MyQth := '東京都八王子市' が再読込で '???????' になる)。
+
+    SetMultiByteConversionCodePage(CP_UTF8) で CP_ACP の実体を UTF-8 に
+    固定すると変換が無損失になり、往復が保証される。ロケール環境変数に
+    依存しないので LANG が未設定の環境でも安全。
+
+    プロセス全体に効くグローバル設定だが冪等なので、JSON 永続化を行う
+    各ユニット (本ユニット / QsoLogbook.pas / OpProfile.pas /
+    AppConfig.pas) がそれぞれ宣言し、リンク順に依存せず単体でも
+    正しく動くようにしている。 }
+  SetMultiByteConversionCodePage(CP_UTF8);
 
 end.
