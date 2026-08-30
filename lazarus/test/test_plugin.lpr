@@ -33,7 +33,7 @@ program test_plugin;
 uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   Classes, SysUtils,
-  PluginApi, PluginHost, EventBus, Observability;
+  PluginApi, PluginHost, EventBus, Observability, Requirements;
 
 var
   FailCount: Integer = 0;
@@ -1054,6 +1054,16 @@ begin
 
   WriteLn;
   WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 (全 ', TestCount, ' 件中) ===');
+  { §18 要求トレーサビリティ: **通ったときだけ** 被覆を申告する。
+    落ちた試験が「検証した」と言ってはならない。 }
+  if FailCount = 0 then
+  begin
+    CoverReq('PLG-001');
+    CoverReq('PLG-003');
+    CoverReq('PLG-004');
+    CoverReq('PLG-005');
+  end;
+
   if FailCount > 0 then
     Halt(1);
 end.

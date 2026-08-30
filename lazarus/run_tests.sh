@@ -18,6 +18,10 @@ test_robustness test_rtty_cw test_station_adif test_adif_full \
 test_modem test_threadsafety test_macro test_rxextract test_evidence test_realtime test_eventbus test_observability \
 test_qsomodel test_plugin test_context_memory"
 
+# §18 の突き合わせは他スイートの申告を材料にするので **最後** に走らせる。
+# SUITES には入れず、実行段で末尾に足す。
+TRACE_SUITE="test_requirements"
+
 # 外部ライブラリを要するスイート (未導入の環境ではリンクできない)
 OPTIONAL_SUITES="test_rigcontrol test_portaudio"
 
@@ -42,6 +46,14 @@ for t in $SUITES; do
   fi
 done
 
+if build_one "$TRACE_SUITE"; then
+  printf '%-20s OK\n' "$TRACE_SUITE"
+else
+  printf '%-20s ビルド失敗\n' "$TRACE_SUITE"
+  grep -E 'Error|Fatal' "/tmp/build_$TRACE_SUITE.log" | head -5
+  fail=1
+fi
+
 for t in $OPTIONAL_SUITES; do
   if build_one "$t"; then
     printf '%-20s OK\n' "$t"
@@ -52,6 +64,13 @@ for t in $OPTIONAL_SUITES; do
 done
 
 clean
+
+# 前回の被覆申告を消す。残しておくと、被覆をやめたスイートの申告が
+# 生き続けて「検証済」の嘘を通してしまう。
+rm -rf test/coverage
+
+# §18 の突き合わせは材料が揃ってから。末尾に置く。
+SUITES="$SUITES $TRACE_SUITE"
 
 echo
 echo "=== 実行 ==="

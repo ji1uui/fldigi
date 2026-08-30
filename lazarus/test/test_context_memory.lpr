@@ -28,7 +28,7 @@ program test_context_memory;
 uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   Classes, SysUtils,
-  CryptoPrimitives, SecureStore, ContextMemory;
+  CryptoPrimitives, SecureStore, ContextMemory, Requirements;
 
 var
   FailCount: Integer = 0;
@@ -665,6 +665,18 @@ begin
 
   WriteLn;
   WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 (全 ', TestCount, ' 件中) ===');
+  { §18 要求トレーサビリティ: **通ったときだけ** 被覆を申告する。
+    落ちた試験が「検証した」と言ってはならない。 }
+  if FailCount = 0 then
+  begin
+    CoverReq('SEC-001');
+    CoverReq('SEC-002');
+    CoverReq('SEC-003');
+    CoverReq('SEC-004');
+    CoverReq('SEC-005');
+    CoverReq('SEC-006');
+  end;
+
   if FailCount > 0 then
     Halt(1);
 end.

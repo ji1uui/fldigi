@@ -19,7 +19,20 @@ uses
   {$ENDIF}
   Classes, SysUtils,
   SoundIntf, ModemTypes, Modem, ModemDSP, DecodeEvidence, MorseTable, TestSupport,
-  RttyModemImpl, CwModemImpl;
+  RttyModemImpl, CwModemImpl, Requirements;
+
+{ この試験は [NG] を印字しても終了コードを 0 のままにしていた。
+  run_tests.sh は [NG] を grep するので battery では捕まっていたが、
+  binary を直接動かした側 (CI など) は失敗に気づけない。数えて返す。 }
+var
+  FailCount: Integer = 0;
+
+procedure Fail(const AMsg: string);
+begin
+  Inc(FailCount);
+  WriteLn('  [NG] ', AMsg);
+end;
+
 
 type
   TDoubleArray = array of Double;
@@ -127,13 +140,13 @@ begin
   if RxSink.ScoredCount > 0 then
     WriteLn('  [OK] RTTY が軟判定の余裕を Evidence として出している (ADR-002)')
   else
-    WriteLn('  [NG] Evidence に尺度が載っていない (ADR-002)');
+    Fail('Evidence に尺度が載っていない (ADR-002)');
 
   Passed := Pos(TestMsg, RxSink.Text) > 0;
   if Passed then
     WriteLn('  [OK] 送信文字列が復調結果に含まれている')
   else
-    WriteLn('  [NG] 送信文字列が復調結果に見つからない!');
+    Fail('送信文字列が復調結果に見つからない!');
 
   TxModem.Free;
   RxModem.Free;
@@ -217,7 +230,7 @@ begin
   if Passed then
     WriteLn('  [OK] 復調結果に "CQ" が検出された')
   else
-    WriteLn('  [NG] 復調結果に "CQ" が見つからない!');
+    Fail('復調結果に "CQ" が見つからない!');
 
   TxModem.Free;
   RxModem.Free;
@@ -232,5 +245,12 @@ end;
 begin
   RunRttyLoopbackTest;
   RunCwLoopbackTest;
-  WriteLn('=== テスト完了 ===');
+  WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 ===');
+
+  { §18 要求トレーサビリティ: 通ったときだけ被覆を申告する。 }
+  if FailCount = 0 then
+    CoverReq('CMP-002');
+
+  if FailCount > 0 then
+    Halt(1);
 end.

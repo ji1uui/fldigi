@@ -19,7 +19,7 @@ program test_adif_full;
 {$mode objfpc}{$H+}
 
 uses
-  Classes, SysUtils, DateUtils, AdifFile;
+  Classes, SysUtils, DateUtils, AdifFile, Requirements;
 
 var
   PassCount, FailCount: Integer;
@@ -561,6 +561,10 @@ begin
   WriteLn('============================');
   WriteLn(Format('結果: %d 件成功 / %d 件失敗 (計 %d 件)',
     [PassCount, FailCount, PassCount + FailCount]));
+
+  { §18 要求トレーサビリティ: 通ったときだけ被覆を申告する。 }
+  if FailCount = 0 then
+    CoverReq('CMP-001');
 
   if FailCount > 0 then
     Halt(1)

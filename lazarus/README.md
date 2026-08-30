@@ -47,6 +47,7 @@ lazarus/
 │   ├── CryptoPrimitives.pas      SHA-256/HMAC/PBKDF2/乱数 (ADR-003)。暗号本体は持たない
 │   ├── SecureStore.pas           保存の容器 (ADR-003 / §8.1)。暗号方式を後から入れられる形
 │   ├── ContextMemory.pas         Context L5/L6 と承認関門 (ADR-003 / §8)
+│   ├── Requirements.pas          要求トレーサビリティ (§18)。表はここが正
 │   ├── MacroEngine.pas           ラバースタンプ/コンテスト用マクロ (fldigi: macros.cxx)
 │   ├── RxExtract.pas             受信テキストからのコール/RST/ナンバー抽出
 │   └── SafeFileIO.pas            原子的なファイル保存・生バイト読込の共通ヘルパー
@@ -68,6 +69,7 @@ lazarus/
     ├── test_qsomodel.lpr     交信データモデル/ADIF アダプタの検証 (ADR-011)
     ├── test_plugin.lpr       Plugin API draft の検証 (ADR-004/005)
     ├── test_context_memory.lpr Context L5/L6 と保存方針の検証 (ADR-003)
+    ├── test_requirements.lpr §18 の突き合わせと表の生成 (最後に走る)
     ├── test_threadsafety.lpr 並行処理・音声・PTT の安全性回帰テスト
     ├── TestSupport.pas       テスト共通部品 (Phase 0: Test framework)
     ├── test_macro.lpr        マクロ展開/送信前バリデーション/実行のテスト
@@ -2996,3 +2998,107 @@ SHA-256 チェックサムであり、破損検出であって認証ではない
 暗号本体の実装、OS 鍵保管との連携、Unix 以外の乱数源、管理 UI の画面は
 Phase 1 (Modern Runtime / UI 分離) で扱う。方式は決まっているので、
 容器を変えずに入れられる。
+
+
+## 22. §18 要求トレーサビリティ
+
+生成物は `docs/requirements-matrix.md`。**この表は手で書かない。**
+
+### なぜ手で書かないか
+
+トレーサビリティ表が役に立たなくなる理由は決まっている。**表と実物が
+ずれても誰も気づかない** からである。とくに Status 欄が
+
+> 「検証済」と書いてあるが、それを確かめる試験は存在しない
+
+になる。この状態の表は、無いより悪い。無ければ確かめに行くが、あれば
+信じてしまう。
+
+そこで:
+
+1. 要求そのものを `units/Requirements.pas` に **データ** として持つ。
+2. 試験が実行時に `CoverReq('LOG-001')` と申告する。
+   文字列を書いておくのではなく、**実際に走った** ことが記録される。
+   申告は **その試験が 1 件も失敗しなかったときだけ** 行う。
+3. `test_requirements` が突き合わせ、
+   **「検証済」なのに誰も検証していない要求があれば落ちる**。
+4. 表は生成する。手で直せないのでずれようがない。
+
+`run_tests.sh` は `test_requirements` を最後に走らせ、その前に
+`test/coverage` を消す。消さないと、**走らなくなったスイートの古い申告が
+生き続けて嘘を通す** (下の反証を参照)。
+
+### §18 の項目
+
+REQ-ID / Experience / Objective / Primary Foundation / Secondary /
+Extension Dependency / Priority / Implementation Phase /
+Verification Method / Status。Primary Foundation は 1 つに限る (§18)。
+
+Baseline §18 は 7 件の例 (RTTY-021 / GUI-014 / CTX-008 / PLG-002 /
+QSL-004 / AWD-003 / CNT-010) を挙げているが全要求の一覧は与えていない。
+よって:
+
+- その 7 件は Baseline の記載を **そのまま** 使う (値も試験で照合)。
+- それ以外は Baseline 本文からこちらで起こし、`出典` 欄に本文の位置を書く。
+
+この区別を曖昧にすると「Baseline にそう書いてある」と誤解される。
+
+### 進捗を過大に報告しないための線引き
+
+QSL-004 (複数 QSL Confirmation) の **データモデル** は Phase 0 で実装し
+試験もした。しかし要求そのものは Phase 6 の「QSL Provider との送受信・
+同期」まで含む。だから QSL-004 の Status は「方針決定」(ADR-011 で設計が
+決まった) にとどめ、Phase 0 で終えた部分は LOG-001..004 として別に立てた。
+混ぜると進捗を過大に報告することになる。
+
+現在: **要求 41 件 (検証済 27 / 方針決定 3 / 起案 5 / 後送り 6)**。
+検証済 27 件はすべて、12 個の試験が実行時に申告している。
+
+### 途中で見つけた欠陥
+
+`test_rtty_cw` と `test_modem` は `[NG]` を印字しても **終了コードを 0 の
+まま** にしていた。`run_tests.sh` が `[NG]` を grep するので battery では
+捕まっていたが、binary を直接動かした側 (CI など) は失敗に気づけない。
+両方に失敗計数を入れて `Halt(1)` するようにした。
+
+被覆の申告を入れようとして初めて気づいた ── 「この試験が通ったか」を
+プログラムから問える必要が出たためである。
+
+### 検証
+
+`test/test_requirements.lpr` は 20 件。検査そのものが働くことを、
+わざと壊した要求一覧 (検証済だが未検証 / Primary が Secondary にも入って
+いる / Verification 空 / 後段フェーズなのに検証済 / REQ-ID 重複 /
+表に無い ID の申告) で確かめている。
+
+反証で確認した項目:
+
+| 壊した箇所 | 結果 |
+|---|---|
+| `test_qsomodel` から `CoverReq('LOG-001')` を消す | 「検証済だが申告が無い」で battery が失敗 |
+| 合否ガードを外し試験を 1 件壊す | 落ちた試験が 4 件の要求を「検証した」と申告してしまう |
+| `test/coverage` の掃除を外し、スイートを 1 つ外す | **古い申告が残り「すべて成功」になる** |
+
+3 つ目は最初 falsification の作り方を誤り、走り続けるスイートで試して
+いた (自分のファイルを上書きするので差が出ない)。**走らなくなった**
+スイートで試して初めて掃除の効果が出た。
+
+全20スイート 1311 件成功。
+
+### Phase 0 完了
+
+| 項目 | 状態 |
+|---|---|
+| ADR-002 / X-04 / ADR-001 / ADR-009 / ModemUI 移行 / ADR-010 | 完了 |
+| Logging data model (ADR-011) | 完了 |
+| Plugin API draft / Capability Model (ADR-004 / ADR-005) | 完了 (draft) |
+| L6 privacy/encryption 方針 (ADR-003) | 完了 |
+| §18 要求トレーサビリティ | **完了** |
+| Test framework | 完了 (TestSupport.pas + run_tests.sh + 被覆突き合わせ) |
+
+Baseline §15 の Phase 0 「後から構造変更しなくて済む骨格を作る」に挙げら
+れた項目 (Core interfaces / Data Plane・Control Plane 境界 / Plugin API
+draft / Event Bus / Audio abstraction / DSP interfaces / 複数候補を返せる
+Modem interface / Logging data model / L6 方針 / Configuration model /
+Observability / Test framework) はすべて着手済み。次は Phase 1
+Modern Runtime。

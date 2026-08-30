@@ -31,7 +31,7 @@ uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   Classes, SysUtils, Math,
   SoundIntf, ModemTypes, Modem, ModemDSP, DecodeEvidence,
-  RttyModemImpl, CwModemImpl, TestSupport;
+  RttyModemImpl, CwModemImpl, TestSupport, Requirements;
 
 const
   { --- deadline に対する判定しきい値 (v1.1 Z-04) ---
@@ -431,6 +431,14 @@ begin
 
   WriteLn;
   WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 (全 ', TestCount, ' 件中) ===');
+  { §18 要求トレーサビリティ: **通ったときだけ** 被覆を申告する。
+    落ちた試験が「検証した」と言ってはならない。 }
+  if FailCount = 0 then
+  begin
+    CoverReq('RT-001');
+    CoverReq('RT-002');
+  end;
+
   if FailCount > 0 then
     Halt(1);
 end.

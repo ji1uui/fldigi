@@ -20,6 +20,12 @@ uses
   Classes, SysUtils,
   SoundIntf, ModemTypes, Modem, ModemEngine, ModemUI, DecodeEvidence, NullModemImpl;
 
+{ [NG] を印字しても終了コードが 0 のままだった。数えて返す
+  (run_tests.sh の grep 頼みにしない)。 }
+var
+  GFailCount: Integer = 0;
+
+
 type
   { テスト用の擬似フォーム。TModemUI からのイベントを受けて
     メインスレッド上で呼ばれたことをカウント・表示する。 }
@@ -62,7 +68,10 @@ procedure TFakeMainForm.OnFreq(Sender: TModemUI; AFrequency: Double);
 begin
   Inc(FFreqCount);
   if ThreadID <> FMainThreadID then
+  begin
+    Inc(GFailCount);
     WriteLn('  [NG] OnFreq がメインスレッド以外で呼ばれた!')
+  end
   else
     WriteLn(Format('  [OK] OnFreq: %.1f Hz (メインスレッドで実行)', [AFrequency]));
 end;
@@ -87,7 +96,10 @@ procedure TFakeMainForm.OnState(Sender: TModemUI; AState: TTrxState);
 begin
   Inc(FStateCount);
   if ThreadID <> FMainThreadID then
+  begin
+    Inc(GFailCount);
     WriteLn('  [NG] OnState がメインスレッド以外で呼ばれた!')
+  end
   else
     WriteLn('  [OK] OnState: ' + IntToStr(Ord(AState)) + ' (メインスレッドで実行)');
 end;
@@ -188,7 +200,7 @@ begin
 
   WriteLn;
   WriteLn(Format('周波数通知回数 = %d, 状態通知回数 = %d', [Form.FreqCount, Form.StateCount]));
-  WriteLn('=== テスト完了 ===');
+  WriteLn('=== テスト完了: ', GFailCount, ' 件の失敗 ===');
 
   { APP-01: 破棄順序を本体 (UnitMainForm.Destroy) と揃える。
     (1) ワーカースレッドを止める (上の RequestExit/WaitFor で完了済み)
@@ -202,4 +214,7 @@ begin
   Form.Free;
   NullModem.Free;
   Sound.Free;
+
+  if GFailCount > 0 then
+    Halt(1);
 end.
