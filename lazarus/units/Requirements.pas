@@ -673,6 +673,11 @@ begin
     [fndEngineeringQuality], False, priMust, 1,
     'test_capture (実時間デバイスで欠落を実測)', rsVerified, '§4 X-01', '');
 
+  R('RT-008', 'FFT等を共有サービス化し資源の重複を無くす',
+    expCommunicate, objPerformance, fndModernComputing,
+    [fndEngineeringQuality], False, priShould, 1,
+    'test_fftshared (直接DFTとの照合・並行使用)', rsVerified, '§4 X-05', '');
+
   R('OBS-001', '障害診断のため出来事を時系列で残す',
     expCommunicate, objRobustness, fndEngineeringQuality, [],
     False, priMust, 0, 'test_observability', rsVerified, '§14 Z-01', 'ADR-010');

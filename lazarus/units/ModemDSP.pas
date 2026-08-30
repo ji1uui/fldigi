@@ -78,6 +78,86 @@ type
 
   TComplexArray = array of TComplex;
 
+{ ============================================================================
+  共有 FFT プラン (§4 X-05「FFT、Noise Estimator、Spectrum 等を共有
+  サービス化する」)
+
+  何が重複していたのか
+  ----------------------------------------------------------------------------
+  FFT を呼ぶたびに、段ごとに Cos/Sin を計算し、内側ループでは
+  ツイドル係数を `w := w * wlen` と漸化式で更新していた。つまり
+
+    - 同じ大きさの FFT を何度呼んでも、毎回同じ係数を計算し直す
+    - 漸化式なので、内側ループが長いほど誤差が積み上がる
+
+  実測 (このプロジェクトが実際に使う長さ):
+
+      N=512  (RTTY mark/space):  35.8 us/回、往復誤差 1.45e-14
+      N=2048 (CW):              174.2 us/回、往復誤差 3.72e-14
+
+  RTTY は 8kHz で毎秒 125 回、CW は毎秒 16 回 FFT を回すので、これが
+  復調の処理時間の大半を占めている。
+
+  共有するもの / しないもの
+  ----------------------------------------------------------------------------
+  共有するのは **係数表とビット反転表** である。同じ長さなら中身が
+  同一で、生成後は読むだけなので、いくつの利用者がいても 1 つあればよい。
+  作業用バッファは利用者ごとの状態なので共有しない。
+
+  RTTY の mark/space は **別の入力** (異なる周波数でミックスダウンした
+  もの) を処理するので、変換結果そのものは共有できない。共有できるのは
+  資源のほうである。
+
+  スレッド安全について
+  ----------------------------------------------------------------------------
+  プランは公開後に変更されない。Forward/Inverse が書き込むのは
+  **呼び出し側のバッファだけ** なので、別スレッドが同じプランを同時に
+  使ってよい。Phase 3 が複数の復調戦略を並べたときに、戦略ごとに
+  プランを持たずに済む。
+
+  なぜ別ユニットにしないのか
+  ----------------------------------------------------------------------------
+  TComplex がこのユニットで定義されており、TFftFilt もここにある。
+  別ユニットへ出すと、TComplex を共有するために循環参照になるか、
+  型を複製することになる。Phase 3 で Noise Estimator と Spectrum も
+  サービス化するときに、共通の型ユニットへ切り出すのが自然な区切りである。
+  ============================================================================ }
+
+type
+  { --- 1 つの長さぶんの FFT 資源 ---
+    生成後は不変。複数のスレッドが同時に使ってよい。 }
+  TFftPlan = class
+  private
+    FSize: Integer;
+    FLog2: Integer;
+    { 段ごとの係数を平坦に並べたもの (合計 N-1 個)。
+      段の half に対する先頭位置は half-1。 }
+    FTwiddle: TComplexArray;
+    FBitRev: array of Integer;
+    FUseCount: Int64;
+    procedure Butterflies(var ABuf: TComplexArray; AConjugate: Boolean);
+  public
+    constructor Create(ASize: Integer);
+    { その場で変換する。確保しない (X-04)。 }
+    procedure Forward(var ABuf: TComplexArray);
+    { その場で逆変換し 1/N を掛ける。確保しない。 }
+    procedure Inverse(var ABuf: TComplexArray);
+    property Size: Integer read FSize;
+    { このプランを何回引き当てたか。共有できているかの確認用。 }
+    property UseCount: Int64 read FUseCount;
+    function TwiddleCount: Integer;
+  end;
+
+{ 長さに対する共有プランを返す。無ければ作る。
+  返るものは process 全体で共有される。解放しないこと。 }
+function SharedFftPlan(ASize: Integer): TFftPlan;
+{ いま保持しているプランの数 (試験・診断用)。 }
+function SharedFftPlanCount: Integer;
+
+{ 係数表を使わない素朴な実装。共有プランが同じ結果を出すことを
+  確かめるための基準として残す。実運用では使わない。 }
+procedure ComplexFFTReference(var ABuf: TComplexArray);
+
 { fldigi: g_fft<double>::ComplexFFT(cmplx *buf)
   buf の要素数 (2の冪乗であること) をそのままFFTサイズとして扱う、
   その場(in-place)複素順変換。スケーリングなし (Σ規約)。 }
@@ -182,6 +262,21 @@ type
   end;
 
 implementation
+
+uses
+  SyncObjs;
+
+const
+  { 2^20 = 1048576 点まで。これ以上は現実的でない。 }
+  MAX_FFT_LOG2 = 20;
+
+var
+  { 長さ (log2) ごとの共有プラン。一度作ったら process 終了まで保つ。
+    数えるほどの種類しか無いので、解放して作り直す意味がない。 }
+  GFftPlans: array[0..MAX_FFT_LOG2] of TFftPlan;
+  GFftPlanLock: TCriticalSection;
+  { finalization は局所変数を持てないのでここに置く。 }
+  GFftFreeIdx: Integer;
 
 operator + (const A, B: TComplex): TComplex;
 begin
@@ -336,7 +431,197 @@ begin
   end;
 end;
 
-procedure ComplexFFT(var ABuf: TComplexArray);
+{ ============================ TFftPlan ============================ }
+
+constructor TFftPlan.Create(ASize: Integer);
+var
+  n, half, j, base, i, k, rev, bits: Integer;
+  ang: Double;
+begin
+  inherited Create;
+  if not IsPowerOfTwo(ASize) then
+    raise EDspError.CreateFmt(
+      'FFT長は2以上の2の冪乗である必要があります (指定: %d)', [ASize]);
+  FSize := ASize;
+
+  FLog2 := 0;
+  n := ASize;
+  while n > 1 do
+  begin
+    n := n shr 1;
+    Inc(FLog2);
+  end;
+
+  { --- 係数表 ---
+    段ごとに w^j = exp(-2*pi*i*j/(2*half)) を並べる。先頭位置は half-1、
+    合計 N-1 個。漸化式ではなく 1 つずつ直接計算するので、内側ループが
+    長くても誤差が積み上がらない。 }
+  SetLength(FTwiddle, FSize);   { N-1 で足りるが、N にしておくと空も扱える }
+  half := 1;
+  while half < FSize do
+  begin
+    base := half - 1;
+    for j := 0 to half - 1 do
+    begin
+      ang := -TWOPI * j / (2 * half);
+      FTwiddle[base + j] := CplxMake(Cos(ang), Sin(ang));
+    end;
+    half := half shl 1;
+  end;
+
+  { --- ビット反転表 --- }
+  SetLength(FBitRev, FSize);
+  bits := FLog2;
+  for i := 0 to FSize - 1 do
+  begin
+    rev := 0;
+    k := i;
+    for j := 0 to bits - 1 do
+    begin
+      rev := (rev shl 1) or (k and 1);
+      k := k shr 1;
+    end;
+    FBitRev[i] := rev;
+  end;
+end;
+
+function TFftPlan.TwiddleCount: Integer;
+begin
+  Result := FSize - 1;
+  if Result < 0 then Result := 0;
+end;
+
+procedure TFftPlan.Butterflies(var ABuf: TComplexArray; AConjugate: Boolean);
+{ 確保しない。読むのは表だけで、書くのは呼び出し側のバッファだけなので、
+  別スレッドが同じプランを同時に使ってよい。 }
+var
+  n, len, half, base, i, j, r: Integer;
+  w, u, v, t: TComplex;
+begin
+  n := FSize;
+
+  { ビット反転の並べ替え。表があるので都度計算しない。 }
+  for i := 0 to n - 1 do
+  begin
+    r := FBitRev[i];
+    if i < r then
+    begin
+      t := ABuf[i];
+      ABuf[i] := ABuf[r];
+      ABuf[r] := t;
+    end;
+  end;
+
+  len := 2;
+  while len <= n do
+  begin
+    half := len shr 1;
+    base := half - 1;
+    i := 0;
+    while i < n do
+    begin
+      for j := 0 to half - 1 do
+      begin
+        w := FTwiddle[base + j];
+        { 逆変換は係数の共役。表を 2 つ持たずに済み、値も厳密に一致する。 }
+        if AConjugate then
+          w.Im := -w.Im;
+        u := ABuf[i + j];
+        v := ABuf[i + j + half] * w;
+        ABuf[i + j] := u + v;
+        ABuf[i + j + half] := u - v;
+      end;
+      Inc(i, len);
+    end;
+    len := len shl 1;
+  end;
+end;
+
+procedure TFftPlan.Forward(var ABuf: TComplexArray);
+begin
+  if Length(ABuf) <> FSize then
+    raise EDspError.CreateFmt(
+      'FFTプランの長さと合いません (プラン %d / バッファ %d)',
+      [FSize, Length(ABuf)]);
+  Butterflies(ABuf, False);
+end;
+
+procedure TFftPlan.Inverse(var ABuf: TComplexArray);
+var
+  i: Integer;
+  invN: Double;
+begin
+  if Length(ABuf) <> FSize then
+    raise EDspError.CreateFmt(
+      'FFTプランの長さと合いません (プラン %d / バッファ %d)',
+      [FSize, Length(ABuf)]);
+  Butterflies(ABuf, True);
+  invN := 1.0 / FSize;
+  for i := 0 to FSize - 1 do
+    ABuf[i] := ABuf[i] * invN;
+end;
+
+{ ============================ 共有プランの置き場 ============================ }
+
+function SharedFftPlan(ASize: Integer): TFftPlan;
+var
+  idx, n: Integer;
+begin
+  if not IsPowerOfTwo(ASize) then
+    raise EDspError.CreateFmt(
+      'FFT長は2以上の2の冪乗である必要があります (指定: %d)', [ASize]);
+
+  idx := 0;
+  n := ASize;
+  while n > 1 do
+  begin
+    n := n shr 1;
+    Inc(idx);
+  end;
+  if idx > MAX_FFT_LOG2 then
+    raise EDspError.CreateFmt(
+      'FFT長が大きすぎます (指定: %d / 上限: %d)',
+      [ASize, 1 shl MAX_FFT_LOG2]);
+
+  { 既にあれば錠を取らずに返す。作るのは長さごとに一度だけなので、
+    毎回の変換で待ち合わせが起きないようにする。 }
+  Result := GFftPlans[idx];
+  ReadBarrier;
+  if Result <> nil then
+  begin
+    Inc(Result.FUseCount);
+    Exit;
+  end;
+
+  GFftPlanLock.Enter;
+  try
+    { 錠を取る間に他のスレッドが作っているかもしれない。 }
+    Result := GFftPlans[idx];
+    if Result = nil then
+    begin
+      Result := TFftPlan.Create(ASize);
+      { 表を作り終えてから公開する。逆順だと、他のスレッドが
+        中身の無いプランを掴みうる。 }
+      WriteBarrier;
+      GFftPlans[idx] := Result;
+    end;
+  finally
+    GFftPlanLock.Leave;
+  end;
+  Inc(Result.FUseCount);
+end;
+
+function SharedFftPlanCount: Integer;
+var
+  i: Integer;
+begin
+  Result := 0;
+  for i := 0 to MAX_FFT_LOG2 do
+    if GFftPlans[i] <> nil then Inc(Result);
+end;
+
+procedure ComplexFFTReference(var ABuf: TComplexArray);
+{ 係数表を使わない素朴な実装。共有プランの結果を照合するための基準。 }
 begin
   if not IsPowerOfTwo(Length(ABuf)) then
     raise EDspError.CreateFmt(
@@ -344,22 +629,21 @@ begin
   FftButterflyCore(ABuf, -1.0);
 end;
 
-procedure InverseComplexFFT(var ABuf: TComplexArray);
-var
-  i, n: Integer;
-  invN: Double;
+procedure ComplexFFT(var ABuf: TComplexArray);
 begin
   if not IsPowerOfTwo(Length(ABuf)) then
     raise EDspError.CreateFmt(
       'FFT長は2以上の2の冪乗である必要があります (指定: %d)', [Length(ABuf)]);
-  FftButterflyCore(ABuf, 1.0);
-  n := Length(ABuf);
-  if n > 0 then
-  begin
-    invN := 1.0 / n;
-    for i := 0 to n - 1 do
-      ABuf[i] := ABuf[i] * invN;
-  end;
+  { 共有プランへ回す。呼び出し側は変わらないまま、係数表の恩恵を受ける。 }
+  SharedFftPlan(Length(ABuf)).Forward(ABuf);
+end;
+
+procedure InverseComplexFFT(var ABuf: TComplexArray);
+begin
+  if not IsPowerOfTwo(Length(ABuf)) then
+    raise EDspError.CreateFmt(
+      'FFT長は2以上の2の冪乗である必要があります (指定: %d)', [Length(ABuf)]);
+  SharedFftPlan(Length(ABuf)).Inverse(ABuf);
 end;
 
 { TMovingAverage }
@@ -655,5 +939,14 @@ function TFftFilt.FlushSize: Integer;
 begin
   Result := FFlen - FInPtr;
 end;
+
+initialization
+  GFftPlanLock := TCriticalSection.Create;
+
+finalization
+  FreeAndNil(GFftPlanLock);
+  { プランは process 全体で共有されるので、ここでまとめて解放する。 }
+  for GFftFreeIdx := 0 to MAX_FFT_LOG2 do
+    FreeAndNil(GFftPlans[GFftFreeIdx]);
 
 end.

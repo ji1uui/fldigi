@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 45 件 (検証済 31 / 実装済 0 / 方針決定 5 / 起案 5 / 後送り 4)
+要求 46 件 (検証済 32 / 実装済 0 / 方針決定 5 / 起案 5 / 後送り 4)
 
 ## Phase 0
 
@@ -56,6 +56,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | RT-005 | Audio History Bufferを保持しReplay Decodeを可能とする | Experiment | D | X | Y | No | Must | test_audioring (並行書込下の整合性) | 検証済 | ✓ | §4 X-06 |  |
 | RT-006 | CPU core数を正しく検出しWorker数の根拠にする | Communicate | C | X | - | No | Must | test_audioring (TThread比較) | 検証済 | ✓ | §4 X-03, X-07 | ADR-009 |
 | RT-007 | Audio I/O専用経路をDSP重処理から分離する | Communicate | B | X | Z | No | Must | test_capture (実時間デバイスで欠落を実測) | 検証済 | ✓ | §4 X-01 |  |
+| RT-008 | FFT等を共有サービス化し資源の重複を無くす | Communicate | C | X | Z | No | Should | test_fftshared (直接DFTとの照合・並行使用) | 検証済 | ✓ | §4 X-05 |  |
 | ARC-005 | L6 Persistent Memoryを実際に暗号化する | Communicate | B | Z | - | No | Should | 外部ライブラリ導入後の往復試験 | 方針決定 |  | §8.1 | ADR-003 |
 | ARC-006 | OSの鍵保管と連携する | Communicate | B | X | - | No | Could | プラットフォーム別の結合試験 | 方針決定 |  | §8.1 | ADR-003 |
 
