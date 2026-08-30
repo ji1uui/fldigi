@@ -668,6 +668,11 @@ begin
     False, priMust, 1, 'test_audioring (TThread比較)', rsVerified,
     '§4 X-03, X-07', 'ADR-009');
 
+  R('RT-007', 'Audio I/O専用経路をDSP重処理から分離する',
+    expCommunicate, objRobustness, fndModernComputing,
+    [fndEngineeringQuality], False, priMust, 1,
+    'test_capture (実時間デバイスで欠落を実測)', rsVerified, '§4 X-01', '');
+
   R('OBS-001', '障害診断のため出来事を時系列で残す',
     expCommunicate, objRobustness, fndEngineeringQuality, [],
     False, priMust, 0, 'test_observability', rsVerified, '§14 Z-01', 'ADR-010');

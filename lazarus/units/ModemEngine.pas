@@ -33,7 +33,8 @@ unit ModemEngine;
 interface
 
 uses
-  Classes, SysUtils, SyncObjs, SoundIntf, ModemTypes, Modem, Observability;
+  Classes, SysUtils, SyncObjs, SoundIntf, ModemTypes, Modem, Observability,
+  AudioCapture;
 
 const
   { fldigi: SCBLOCKSIZE (sound.h) -- 1回のRead/Writeで扱うサンプル数 }
@@ -87,6 +88,15 @@ type
       観測のために DSP 層が診断機構を知る必要はない。 }
     FBlockMetric: TObsMetric;
 
+    { --- 取り込みの分離 (X-01) ---
+      nil なら従来どおりデバイスから直接読む。設定されていればリングから
+      読む ── 復調が遅れても取り込みは止まらないので、遅れがそのまま
+      取りこぼしにならない。
+
+      借り物であって所有しない。生成・起動・破棄は呼び出し側が行う。
+      エンジンが所有すると、音声デバイスの寿命との関係が二重になる。 }
+    FCapture: TAudioCapture;
+
     function GetState: TTrxState;
     function GetActiveModem: TCustomModem;
     function GetOnStateChanged: TEngineStateEvent;
@@ -127,6 +137,17 @@ type
       イベントを使うため、同時呼び出しでは待ち合わせが混線する。
       モード切替は UI/制御スレッド 1 本から行う想定である。 }
     procedure SetModem(AModem: TCustomModem);
+
+    { --- 取り込みスレッドを繋ぐ / 外す (X-01) ---
+      繋ぐと RX はリングから読むようになる。ACapture は借り物で、
+      止めるのも解放するのも呼び出し側の責任である。
+
+      エンジンが受信中に呼ばないこと ── RxLoopStep が読む先が途中で
+      変わると、リングとデバイスの両方から半端に読むことになる。 }
+    procedure AttachCapture(ACapture: TAudioCapture);
+    procedure DetachCapture;
+    function IsCaptureSeparated: Boolean;
+    property Capture: TAudioCapture read FCapture;
 
     { fldigi: void trx_receive(void); -- STATE_RX への遷移要求 }
     procedure RequestReceive;
@@ -362,7 +383,13 @@ procedure TModemEngine.AbortBlockingIo;
   WaitFor が戻らず、アプリが終了できない状態になる。 }
 begin
   try
-    if Assigned(FRxSound) then
+    { 取り込みを分離しているときは、RX デバイスでブロックしているのは
+      **取り込みスレッドの側** であってエンジンではない。ここで叩くと
+      他人の I/O を横から解除することになり、取り込み側は原因不明の
+      読み出し失敗として数えてしまう。
+      分離しているときの RX の停止は、取り込みスレッドの RequestStop が
+      受け持つ (呼ぶのは所有者である呼び出し側)。 }
+    if Assigned(FRxSound) and (FCapture = nil) then
       FRxSound.AbortIO;
   except
     on E: Exception do ; // 終了処理中の失敗は伝播させない
@@ -492,6 +519,31 @@ begin
     h(Self, AMsg);
 end;
 
+procedure TModemEngine.AttachCapture(ACapture: TAudioCapture);
+begin
+  { 受信中に差し替えると、リングとデバイスの両方から半端に読むことに
+    なる。状態を見て拒む ── 黙って受け入れて壊れるより、断って
+    呼び出し側に順序を直させるほうがよい。 }
+  if GetState = tsReceive then
+    raise EModemEngineError.Create(
+      '受信中に取り込みスレッドを繋ぎ替えることはできません。' +
+      '先に RequestPause などで受信を止めてください。');
+  FCapture := ACapture;
+end;
+
+procedure TModemEngine.DetachCapture;
+begin
+  if GetState = tsReceive then
+    raise EModemEngineError.Create(
+      '受信中に取り込みスレッドを外すことはできません。');
+  FCapture := nil;
+end;
+
+function TModemEngine.IsCaptureSeparated: Boolean;
+begin
+  Result := FCapture <> nil;
+end;
+
 procedure TModemEngine.RxLoopStep;
 var
   NRead, Res: Integer;
@@ -501,16 +553,42 @@ begin
   { デバイスが未オープン/未設定のときは例外を投げずに待機する。
     そうしないと「まだ開いていない」という正常な過渡状態のたびに
     毎ループ例外が飛び、エラー通知が洪水になる。 }
-  if (FActiveModem = nil) or (FRxSound = nil) or (not FRxSound.IsOpen) then
+  if FActiveModem = nil then
   begin
     Sleep(10);
     Exit;
   end;
-  NRead := FRxSound.ReadSamples(FRxBuf, MODEM_BLOCK_SIZE);
-  if NRead <= 0 then
+
+  if FCapture <> nil then
   begin
-    Sleep(1);
-    Exit;
+    { --- 分離あり (X-01) ---
+      リングから読む。デバイスは取り込みスレッドが握っているので、
+      ここが遅れても読み出しは止まらない。 }
+    NRead := FCapture.Ring.Read(FRxBuf, MODEM_BLOCK_SIZE);
+    if NRead <= 0 then
+    begin
+      { まだ溜まっていない。ここで回し続けると 1 コア食い潰す。
+        取り込みは別スレッドで進んでいるので、待っても音は失われない。 }
+      Sleep(1);
+      Exit;
+    end;
+  end
+  else
+  begin
+    { --- 分離なし (従来経路) ---
+      デバイスから直接読む。復調にかかった時間だけ次の読み出しが
+      遅れ、その間の音はデバイス側で失われる。 }
+    if (FRxSound = nil) or (not FRxSound.IsOpen) then
+    begin
+      Sleep(10);
+      Exit;
+    end;
+    NRead := FRxSound.ReadSamples(FRxBuf, MODEM_BLOCK_SIZE);
+    if NRead <= 0 then
+    begin
+      Sleep(1);
+      Exit;
+    end;
   end;
   { Z-04: 復調にかかった時間を測る。測らない設定なら時刻取得もしない
     (観測のために realtime 経路へ余計な仕事を足さない)。 }

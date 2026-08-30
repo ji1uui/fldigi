@@ -27,6 +27,7 @@ test/test_plugin
 test/test_context_memory
 test/test_requirements
 test/test_audioring
+test/test_capture
 test/coverage/
 forms/DemoModemApp
 *.res
