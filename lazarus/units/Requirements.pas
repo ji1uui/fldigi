@@ -58,8 +58,13 @@ uses
 const
   { いま到達しているフェーズ。Status が rsVerified の要求は、この値より
     後のフェーズのものであってはならない (Phase 5 の要求を Phase 0 で
-    「検証済み」とは言えない)。 }
-  CURRENT_PHASE = 0;
+    「検証済み」とは言えない)。
+
+    Phase 0 の項目がすべて揃ったので 1 へ進めた。ここを上げるのは
+    「そのフェーズに着手した」という宣言であって、完了の宣言ではない。
+    上げた瞬間にそのフェーズの要求が「検証済」を名乗れるようになるので、
+    実際に試験が申告しているかは test_requirements が突き合わせる。 }
+  CURRENT_PHASE = 1;
 
 type
   ERequirementsError = class(Exception);
@@ -649,6 +654,20 @@ begin
     expCommunicate, objPerformance, fndModernComputing, [], False,
     priShould, 0, '実測 (README §16)', rsAccepted, '§4 X-03', 'ADR-009');
 
+  { --- Phase 1 Modern Runtime --- }
+  R('RT-004', '取り込みと復調をRing Bufferで分離する',
+    expCommunicate, objRobustness, fndModernComputing,
+    [fndEngineeringQuality], False, priMust, 1,
+    'test_audioring (2スレッド通し番号照合)', rsVerified, '§4 X-01, §5.1', '');
+  R('RT-005', 'Audio History Bufferを保持しReplay Decodeを可能とする',
+    expExperiment, objNewExperience, fndModernComputing,
+    [fndIntelligentReceiver], False, priMust, 1,
+    'test_audioring (並行書込下の整合性)', rsVerified, '§4 X-06', '');
+  R('RT-006', 'CPU core数を正しく検出しWorker数の根拠にする',
+    expCommunicate, objPerformance, fndModernComputing, [],
+    False, priMust, 1, 'test_audioring (TThread比較)', rsVerified,
+    '§4 X-03, X-07', 'ADR-009');
+
   R('OBS-001', '障害診断のため出来事を時系列で残す',
     expCommunicate, objRobustness, fndEngineeringQuality, [],
     False, priMust, 0, 'test_observability', rsVerified, '§14 Z-01', 'ADR-010');
@@ -739,11 +758,11 @@ begin
     ====================================================================== }
   R('ARC-005', 'L6 Persistent Memoryを実際に暗号化する',
     expCommunicate, objRobustness, fndEngineeringQuality, [],
-    False, priShould, 1, '外部ライブラリ導入後の往復試験', rsDeferred,
+    False, priShould, 1, '外部ライブラリ導入後の往復試験', rsAccepted,
     '§8.1', 'ADR-003');
   R('ARC-006', 'OSの鍵保管と連携する',
     expCommunicate, objRobustness, fndModernComputing, [],
-    False, priCould, 1, 'プラットフォーム別の結合試験', rsDeferred,
+    False, priCould, 1, 'プラットフォーム別の結合試験', rsAccepted,
     '§8.1', 'ADR-003');
   R('MDM-001', '劣悪条件のTest vectorsで回帰試験を行う',
     expCommunicate, objRobustness, fndEngineeringQuality,

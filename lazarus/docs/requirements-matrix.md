@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 41 件 (検証済 27 / 実装済 0 / 方針決定 3 / 起案 5 / 後送り 6)
+要求 44 件 (検証済 30 / 実装済 0 / 方針決定 5 / 起案 5 / 後送り 4)
 
 ## Phase 0
 
@@ -52,8 +52,11 @@ Verification / Status。Primary Foundation は 1 つに限る。
 
 | REQ-ID | 要求 | Exp | Obj | Pri | Sec | Ext | Prio | Verification | Status | 検証 | 出典 | ADR |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| ARC-005 | L6 Persistent Memoryを実際に暗号化する | Communicate | B | Z | - | No | Should | 外部ライブラリ導入後の往復試験 | 後送り |  | §8.1 | ADR-003 |
-| ARC-006 | OSの鍵保管と連携する | Communicate | B | X | - | No | Could | プラットフォーム別の結合試験 | 後送り |  | §8.1 | ADR-003 |
+| RT-004 | 取り込みと復調をRing Bufferで分離する | Communicate | B | X | Z | No | Must | test_audioring (2スレッド通し番号照合) | 検証済 | ✓ | §4 X-01, §5.1 |  |
+| RT-005 | Audio History Bufferを保持しReplay Decodeを可能とする | Experiment | D | X | Y | No | Must | test_audioring (並行書込下の整合性) | 検証済 | ✓ | §4 X-06 |  |
+| RT-006 | CPU core数を正しく検出しWorker数の根拠にする | Communicate | C | X | - | No | Must | test_audioring (TThread比較) | 検証済 | ✓ | §4 X-03, X-07 | ADR-009 |
+| ARC-005 | L6 Persistent Memoryを実際に暗号化する | Communicate | B | Z | - | No | Should | 外部ライブラリ導入後の往復試験 | 方針決定 |  | §8.1 | ADR-003 |
+| ARC-006 | OSの鍵保管と連携する | Communicate | B | X | - | No | Could | プラットフォーム別の結合試験 | 方針決定 |  | §8.1 | ADR-003 |
 
 ## Phase 2
 
