@@ -42,6 +42,8 @@ lazarus/
 │   ├── Observability.pas         観測 (ADR-010 / Z-01): 出来事の記録と数値の統計
 │   ├── QsoModel.pas              交信の内部データモデル (ADR-011 / §13)
 │   ├── QsoAdifAdapter.pas        内部モデル <-> ADIF の変換 (ADR-011 / §13.4)
+│   ├── PluginApi.pas             Plugin 境界 (ADR-004/005 / §11)。Plugin 作者が使う
+│   ├── PluginHost.pas            Plugin の受け入れ・関門・隔離 (Core 側のみ)
 │   ├── MacroEngine.pas           ラバースタンプ/コンテスト用マクロ (fldigi: macros.cxx)
 │   ├── RxExtract.pas             受信テキストからのコール/RST/ナンバー抽出
 │   └── SafeFileIO.pas            原子的なファイル保存・生バイト読込の共通ヘルパー
@@ -61,6 +63,7 @@ lazarus/
     ├── test_opprofile.lpr    運用プロファイル/PC固有設定の動作確認テスト
     ├── test_robustness.lpr   堅牢性・品質改善の回帰テスト
     ├── test_qsomodel.lpr     交信データモデル/ADIF アダプタの検証 (ADR-011)
+    ├── test_plugin.lpr       Plugin API draft の検証 (ADR-004/005)
     ├── test_threadsafety.lpr 並行処理・音声・PTT の安全性回帰テスト
     ├── TestSupport.pas       テスト共通部品 (Phase 0: Test framework)
     ├── test_macro.lpr        マクロ展開/送信前バリデーション/実行のテスト
@@ -2760,3 +2763,112 @@ v1.1 は Z-01 の目的を「障害診断とアルゴリズム改善の二つ」
 
 `QsoLogbook.TQsoRecord` は当面そのまま残る。UI がまだこれを使っているため
 で、置き換えは Phase 1 (UI 分離) と合わせて行う。
+
+
+## 20. §11 Plugin API draft
+
+決定は `docs/adr/ADR-004-plugin-compatibility.md` と
+`docs/adr/ADR-005-plugin-isolation.md`。
+
+### 二つのユニットに分けた理由
+
+| ユニット | 誰がコンパイルするか |
+|---|---|
+| `units/PluginApi.pas` | **Plugin 作者**。境界の型・交渉・直列化 |
+| `units/PluginHost.pas` | Core だけ。受け入れ・関門・隔離 |
+
+Plugin は `PluginHost` に依存しない。この向きを保つことが、後で Plugin を
+別プロセスへ出せるかどうかを決める。逆向きの依存が 1 本でも付くと、
+Plugin が Core の内部構造を掴んでしまい境界が意味を失う。
+
+### 「サブプロセス化を妨げない」を検証可能にした
+
+§11.1 のこの原則は、宣言しただけでは守られない。**守られていないことに
+気づけない** からである。境界を越える型にオブジェクト参照が 1 つ混ざれば
+二度と別プロセスへ出せないが、その時点では何も壊れず、Phase 5 になって
+初めて分かる。
+
+そこで境界を越える型を **バイト列に往復できること** で定義した。
+`test_plugin` の 3 番がすべての境界型について往復を固定しているので、
+誰かが将来 `TPluginMessage` にオブジェクト参照を足せば **その時点で**
+落ちる。
+
+例外は `TPluginHostContext` だけで、これは RPC のスタブに当たる
+(別プロセス化時に中継実装へ差し替わる)。よってここに置いてよいのは
+引数と戻り値がすべて値のメソッドだけ、という制約になる。
+
+波形は境界を通さない。`TModemPluginBase.ProcessBlock` の配列は
+「呼び出しの間だけ有効・保持禁止」という規約にした (ADR-001)。
+この規約があるから、後で共有メモリのリングに置き換えられる。
+
+### 障害の非波及
+
+Plugin への呼び出しはすべて関門
+(`SafeInitialize` / `SafeShutdown` / `SafeHandle`) を通る。
+例外を受け止め、連続失敗を数え、所要時間を測る。
+
+隔離は **連続** 失敗で判断する (既定 3 回)。通算で切ると健全な Plugin が
+いつか必ず隔離され、許し続けると壊れたものが永久に呼ばれ続ける。
+
+時間については正直に書いておくと、同一プロセスでは **測れるが止められない**。
+Plugin が無限ループに入れば呼んだスレッドは戻らない。Z-04 の deadline を
+Plugin に強制するには別プロセスに出すしかない。いま測っているのは
+「その必要があるかを判断する材料」である。これが ADR-005 が要る理由そのもの。
+
+### 検証
+
+`test/test_plugin.lpr` は 146 件。壊れた Plugin (Handle で投げる /
+自己申告で投げる / 初期化で投げる / 終了処理で投げる / ときどき投げる) を
+実際に登録して呼んでいる。
+
+反証で確認した項目:
+
+| 戻した / 壊した箇所 | 結果 |
+|---|---|
+| 関門の try を外す | **テスト全体がプロセスごと落ちる** (rc=217) |
+| 隔離を通算失敗で判断 | 連続で数えている前提の 4 件が落ちる |
+| 発行元を Plugin に名乗らせる | なりすまし検出の 2 件が落ちる |
+| 0.x で MINOR を上位互換に | SemVer の 0.x 規則が落ちる |
+| Test vectors 必須を外す | §11.1 の必須要件 2 件が落ちる |
+| 直列化の長さ検査を外す | **Access violation で落ちる** |
+
+このうち 3 件は最初のテストが通ってしまった (弱かった) ので書き直した。
+
+- **通算 vs 連続**: 試験用の Plugin が「最初の 2 回だけ失敗」だったため、
+  通算と連続が食い違わなかった。「3 回に 1 回失敗し続ける」に変えた。
+- **なりすまし**: 記録 (`Log`) の経路しか見ておらず、発行 (`Publish`) の
+  経路が無検査だった。Plugin が `source` を詐称して発行する試験を足した。
+- **壊れた長さ**: 戻り値しか見ておらず「拒否する前に 2GB 確保する」を
+  見逃していた。メモリマネージャを差し替えて最大確保サイズを実測する
+  ようにした。
+
+### 設計の途中で直したこと
+
+当初 capability は Provides / Requires の二つだった。テストが
+「交渉で通った機能は使える」で落ちて、`HasCapability` が
+**Plugin 自身が知っていることを Host に聞く** 無意味な口になっていると
+分かった。Host に求めるものを Requires (必須) と Wants (任意) に分け、
+`Granted = (Requires + Wants) ∩ HostCapabilities` とした。
+
+§11.1 が言う「機能差を扱う」とは、無いときに落ちることではなく
+**無いなりに動けるようにすること** である。Wants が無ければ Plugin は
+「必須にして拒否される」か「諦めて宣言しない」の二択しかなく、交渉に
+なっていない。
+
+全18スイート 1163 件成功。
+
+### Phase 0 の残り
+
+| 項目 | 状態 |
+|---|---|
+| ADR-002 / X-04 / ADR-001 / ADR-009 / ModemUI 移行 / ADR-010 | 完了 |
+| Logging data model (ADR-011) | 完了 |
+| Plugin API draft / Capability Model (ADR-004 / ADR-005) | **完了 (draft)** |
+| Test framework | 着手 (TestSupport.pas) |
+| ADR-003 L6 privacy/encryption 方針 | 未着手 |
+| §18 要求トレーサビリティ | 未着手 |
+
+Phase 5 で "Stable Plugin API" として 1.0.0 を切るまで、Host API は 0.x の
+ままである (0.x は MINOR の一致を要求するので、変更のたびに Plugin 側の
+更新が要る)。動的ライブラリの読み込みは Phase 5 の仕事で、ここでは
+「何が境界を越えるか」だけを決めている。

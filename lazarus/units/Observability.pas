@@ -97,6 +97,13 @@ type
     ocdSubscriberError,      // 購読者が例外を投げた
     { --- 実時間性 --- }
     ocdDeadlineExceeded,     // ブロック処理が deadline を超えた
+    { --- 拡張 (§11 / ADR-004 / ADR-005) ---
+      Plugin の障害を Core の障害と同じ場所で見られるようにする。 }
+    ocdPluginLoaded,         // 受け入れた (I1=種別)
+    ocdPluginRejected,       // 交渉が成立せず受け入れなかった
+    ocdPluginFault,          // 呼び出しが例外を投げた (I1=連続失敗回数)
+    ocdPluginQuarantined,    // 失敗が続いたので呼ぶのをやめた
+    ocdPluginSlow,           // 呼び出しが予算を超えた (D1=秒)
     { --- 汎用 --- }
     ocdStatus,
     ocdError
@@ -347,6 +354,11 @@ begin
     ocdEventDropped:      Result := 'EventDropped';
     ocdSubscriberError:   Result := 'SubscriberError';
     ocdDeadlineExceeded:  Result := 'DeadlineExceeded';
+    ocdPluginLoaded:      Result := 'PluginLoaded';
+    ocdPluginRejected:    Result := 'PluginRejected';
+    ocdPluginFault:       Result := 'PluginFault';
+    ocdPluginQuarantined: Result := 'PluginQuarantined';
+    ocdPluginSlow:        Result := 'PluginSlow';
     ocdStatus:            Result := 'Status';
     ocdError:             Result := 'Error';
   else
