@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 47 件 (検証済 33 / 実装済 0 / 方針決定 5 / 起案 5 / 後送り 4)
+要求 48 件 (検証済 33 / 実装済 0 / 方針決定 5 / 起案 5 / 後送り 5)
 
 ## Phase 0
 
@@ -65,6 +65,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 
 | REQ-ID | 要求 | Exp | Obj | Pri | Sec | Ext | Prio | Verification | Status | 検証 | 出典 | ADR |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
+| MDM-002 | CW受信の整定過渡で先頭要素を失わない | Communicate | B | Y | Z | No | Should | Golden WAV BER/CER (MDM-001 の整備後) | 後送り |  | §3 A / §16。原因は特定済み (README §27) |  |
 | MDM-001 | 劣悪条件のTest vectorsで回帰試験を行う | Communicate | B | Z | Y | No | Must | Golden WAV BER/CER | 後送り |  | §14 Z-02, §16 |  |
 
 ## Phase 3
