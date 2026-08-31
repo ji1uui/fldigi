@@ -28,7 +28,16 @@
     既定offのため優先度低)・rttyの矩形波整形のようなSymbolShaperは
     未実装のまま。
   - decode_stream(): AGC(自動利得制御)/ノイズフロア追跡付きの
-    ヒステリシス検出 (upper/lower threshold) をそのまま移植
+    ヒステリシス検出 (upper/lower threshold) をそのまま移植。
+    【2026-08 トーン検出の作り直し】この判定には構造的な弱点があり
+    (遅れて育つ推定量で今の値を正規化するため、起動直後に閾値が逆転する)、
+    先頭文字が壊れる原因になっていた。判定部だけを CwToneDetect.pas の
+    TCwToneDetector (窓の中央について判定する遅延型の検出器) に
+    差し替え、既定をそちらにした。fldigi 由来の判定は
+    UseLegacyToneDetector = True で選べる形で残してある
+    (新旧を同じ入力で比べられないと改善が測れないため)。
+    合わせて、受信系フィルタの立ち上がり過渡を復号に渡さないようにした
+    (RxProcess の FWarmupLeft)。詳細は README §27/§28。
   - handle_event(): CW_RESET/KEYDOWN/KEYUP/QUERY の4イベントに対する
     RS_IDLE/RS_IN_TONE/RS_AFTER_TONE ステートマシンをそのまま移植
   - update_tracking(): ドット/ダッシュペア比較による適応速度追跡
@@ -60,7 +69,7 @@ interface
 
 uses
   Classes, SysUtils, Math, SoundIntf, ModemTypes, Modem, ModemDSP, MorseTable,
-  DecodeEvidence;
+  CwToneDetect, DecodeEvidence;
 
 const
   CW_SAMPLE_RATE = 8000;              // fldigi: #define CW_SAMPLERATE 8000
@@ -138,6 +147,7 @@ type
     FBitFilter: TMovingAverage;      // fldigi: Cmovavg *bitfilter
     FMixerFilt: TFftFilt;            // fldigi: fftfilt *cw_FFT_filter
     FFiltBandwidth: Double;          // 直近にフィルタ生成に使った Bandwidth (変更検出用)
+    FWarmupLeft: Integer;            // 受信系が落ち着くまで捨てる復号呼び出し回数
     FCwTrackOn: Boolean;             // fldigi: cwTrack (基底クラスの CwTrack と同期)
 
     // --- decode_stream 用の AGC / しきい値状態 ---
@@ -148,6 +158,11 @@ type
     FAgcPeak: Double;                // fldigi: agc_peak
     FCwUpper, FCwLower: Double;      // fldigi: progdefaults.CWupper/CWlower (ヒステリシス閾値)
     FSigLevel: Double;               // fldigi: siglevel
+
+    // --- トーン検出 (CwToneDetect。既定はこちらを使う) ---
+    FToneDetector: TCwToneDetector;
+    FToneDotCalls: Integer;          // 直近に Configure した 1 単位長 [呼び出し回数]
+    FUseLegacyDetector: Boolean;     // True で fldigi 由来の正規化+適応閾値に戻す
 
     // --- ミキサー / サンプルカウンタ ---
     FMixerPhase: Double;             // fldigi: phaseacc (rx 側ミキサー用、tx とは別変数として保持)
@@ -166,6 +181,8 @@ type
     procedure SyncParameters;
     procedure UpdateTracking(ADur1, ADur2: Int64);
     procedure DecodeStream(AValue: Double);
+    procedure ConfigureToneDetector;
+    function WarmupCalls: Integer;
     function HandleEvent(AEvent: TCwEvent; out ASc: string): Boolean; // True=CW_SUCCESS
     { ADR-002: 復号文字を Evidence として送り出す。 }
     procedure EmitCwChar(ACh: Integer);
@@ -199,6 +216,11 @@ type
 
     property CwSpeed: Integer read FCwSpeed;
     property CwReceiveSpeed: Integer read FCwReceiveSpeed;
+
+    { True にすると fldigi 由来の検出 (正規化 + 適応閾値) に戻る。
+      新旧を同じ入力で比べられるようにするために残してある。既定 False。 }
+    property UseLegacyToneDetector: Boolean
+      read FUseLegacyDetector write FUseLegacyDetector;
   end;
 
 implementation
@@ -255,6 +277,10 @@ begin
   FBitFilter := TMovingAverage.Create(Bfv);
   FTrackingFilter := TMovingAverage.Create(CW_TRACKING_FILTER_SIZE);
 
+  FToneDetector := TCwToneDetector.Create;
+  FToneDotCalls := 0;
+  FUseLegacyDetector := False;
+
   // fldigi: cw_FFT_filter = new fftfilt(1.0*bandwidth/samplerate, CW_FFT_SIZE);
   //         cw_FFT_filter->create_lpf(...) は reset_rx_filter() 内でも呼ばれる
   //         (Bandwidth 変更時は RxProcess 先頭で再生成する。下記参照)
@@ -284,6 +310,7 @@ begin
   FMixerFilt.Free;
   FTrackingFilter.Free;
   FBitFilter.Free;
+  FToneDetector.Free;
   FMorse.Free;
   inherited Destroy;
 end;
@@ -302,6 +329,9 @@ begin
   FSmplCtr := 0;
   FRxRepBuf := '';
   FAgcPeak := 0;
+  FWarmupLeft := WarmupCalls;
+  if FToneDetector <> nil then
+    FToneDetector.Reset;
   FUseDefaultWPM := False;
   EmitStatus(Format('CW Rx %d', [FCwReceiveSpeed]));
 end;
@@ -383,7 +413,42 @@ begin
   FCwReceiveDashLength := 3 * FCwReceiveDotLength;
   FCwNoiseSpikeThreshold := FCwReceiveDotLength div 2;
 
+  ConfigureToneDetector;
+
   UpdateCwRcvWPM(FCwReceiveSpeed);
+end;
+
+function TCwModem.WarmupCalls: Integer;
+begin
+  { FFT ローパスのインパルス応答 (CW_FFT_SIZE/2 サンプル) と
+    ビットフィルタ (FBitFilter.Len 回) の和。DecodeStream は
+    CW_DEC_RATIO に 1 回しか呼ばれないので、前者は割ってから足す。 }
+  Result := CW_FFT_SIZE div (2 * CW_DEC_RATIO);
+  if FBitFilter <> nil then
+    Result := Result + FBitFilter.Len;
+end;
+
+procedure TCwModem.ConfigureToneDetector;
+var
+  DotCalls: Integer;
+begin
+  { 検出器の窓は「1 単位長 (短点) が Feed 何回分か」で決まる。
+    DecodeStream は間引き後の SampleRate/CW_DEC_RATIO で呼ばれ、
+    1 単位長は FSymbolLen サンプルなので、その比を渡す。
+
+    速度が変わったときだけ Configure する。Configure は窓を捨てるので、
+    受信中に毎回呼ぶと立ち上がりを取りこぼす。 }
+  if FToneDetector = nil then
+    Exit;
+
+  DotCalls := FSymbolLen div CW_DEC_RATIO;
+  if DotCalls < 1 then
+    DotCalls := 1;
+  if DotCalls <> FToneDotCalls then
+  begin
+    FToneDotCalls := DotCalls;
+    FToneDetector.Configure(DotCalls);
+  end;
 end;
 
 procedure TCwModem.UpdateTracking(ADur1, ADur2: Int64);
@@ -497,6 +562,7 @@ var
   NormNoise, NormSig, Diff: Double;
   Sc: string;
   Value: Double;
+  Decision: TCwToneDecision;
 begin
   // fldigi: void cw::decode_stream(double value)
   // (progdefaults.cwrx_attack/decay は既定 "MEDIUM" 相当に固定)
@@ -545,11 +611,27 @@ begin
   FCwUpper := NormSig - 0.2 * Diff;
   FCwLower := NormNoise + 0.7 * Diff;
 
-  // Power detection using hysteresis detector
-  if (Value > FCwUpper) and (FCwReceiveState <> crsInTone) then
-    HandleEvent(ceKeyDown, Sc);
-  if (Value < FCwLower) and (FCwReceiveState = crsInTone) then
-    HandleEvent(ceKeyUp, Sc);
+  if FUseLegacyDetector then
+  begin
+    // fldigi 由来: agc_peak で正規化した値を適応閾値と比べる。
+    if (Value > FCwUpper) and (FCwReceiveState <> crsInTone) then
+      HandleEvent(ceKeyDown, Sc);
+    if (Value < FCwLower) and (FCwReceiveState = crsInTone) then
+      HandleEvent(ceKeyUp, Sc);
+  end
+  else
+  begin
+    { 正規化前の生の大きさを渡す。検出器は窓内の最小/最大だけを見るので
+      正規化を必要としない (CwToneDetect.pas 冒頭の説明を参照)。 }
+    Decision := FToneDetector.Feed(AValue);
+
+    { ctdUnknown = 打鍵が無い / 判断材料が足りない。このとき状態機械を
+      動かさないことが、雑音だけの区間で誤字を出さない仕組みである。 }
+    if (Decision = ctdOn) and (FCwReceiveState <> crsInTone) then
+      HandleEvent(ceKeyDown, Sc);
+    if (Decision = ctdOff) and (FCwReceiveState = crsInTone) then
+      HandleEvent(ceKeyUp, Sc);
+  end;
 
   if HandleEvent(ceQuery, Sc) then
   begin
@@ -724,6 +806,10 @@ begin
     FMixerFilt := TFftFilt.Create(CW_FFT_SIZE);
     FMixerFilt.CreateLpf(Bandwidth / SampleRate);
     FFiltBandwidth := Bandwidth;
+    { フィルタを作り直したので、また過渡が出る。 }
+    FWarmupLeft := WarmupCalls;
+    if FToneDetector <> nil then
+      FToneDetector.Reset;
   end;
 
   for i := 0 to ALen - 1 do
@@ -740,6 +826,26 @@ begin
 
       Value := CplxAbs(FiltOut[j]);
       Value := FBitFilter.Run(Value);
+
+      { 受信系の立ち上がり過渡は捨てる。
+
+        FFT ローパスも移動平均も、動き始めは出力が 0 から本来の値へ
+        単調に上がってくる。この上がり方は「無音からトーンが始まった」
+        のと区別がつかないため、そのまま復号に渡すと先頭に余分な
+        1 要素が生まれる (実測で 13 例中 12 例の先頭に T が付いた)。
+
+        過渡の長さはフィルタの長さで決まるので、そのぶんだけ捨てる。
+        定常状態の振る舞いは何も変わらない。
+
+        なお fldigi 由来の判定 (UseLegacyToneDetector) には、これ単独では
+        効かない。あちらは正規化で過渡をある程度吸収してしまい、代わりに
+        agc_peak / noise_floor の初期値が壊れる別の害を受ける (README §27)。
+        測り直した成績は過渡を捨てても捨てなくても 192/200 で変わらない。 }
+      if FWarmupLeft > 0 then
+      begin
+        Dec(FWarmupLeft);
+        Continue;
+      end;
 
       DecodeStream(Value);
     end;

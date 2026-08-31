@@ -782,9 +782,9 @@ begin
     '§8.1', 'ADR-003');
   R('MDM-002', 'CW受信の整定過渡で先頭要素を失わない',
     expCommunicate, objRobustness, fndIntelligentReceiver,
-    [fndEngineeringQuality], False, priShould, 2,
-    'Golden WAV BER/CER (MDM-001 の整備後)', rsDeferred,
-    '§3 A / §16。原因は特定済み (README §27)', '');
+    [fndEngineeringQuality], False, priShould, 1,
+    'test_cw_leading (整定過渡・低S/N・雑音のみ) / test_cw_tone', rsVerified,
+    '§3 A / §16。README §28', '');
 
   R('MDM-001', '劣悪条件のTest vectorsで回帰試験を行う',
     expCommunicate, objRobustness, fndEngineeringQuality,

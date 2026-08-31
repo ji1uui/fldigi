@@ -79,7 +79,7 @@ end;
 { 送信 → 受信を通して復調文字列を返す。
   実運用と同じく、信号の前後に受信機の雑音を流す。 }
 function RoundTrip(const AMsg: string; AWpm: Integer;
-  ANoise: Double): string;
+  ANoise: Double; ALeadSec: Double = 1.0): string;
 var
   txSound, rxSound: TCaptureSoundDevice;
   tx, rx: TCwModem;
@@ -124,7 +124,8 @@ begin
     wave := txSound.GetCapturedCopy;
 
     { 実際の受信機は送信開始前から雑音を受け続けている。 }
-    FeedNoise(1.0);
+    if ALeadSec > 0 then
+      FeedNoise(ALeadSec);
 
     for i := 0 to High(wave) do
       wave[i] := wave[i] + ANoise * (Random - 0.5);
@@ -146,11 +147,11 @@ begin
 end;
 
 procedure CheckRoundTrip(const AMsg: string; AWpm: Integer;
-  ANoise: Double; const AWhat: string);
+  ANoise: Double; const AWhat: string; ALeadSec: Double = 1.0);
 var
   got: string;
 begin
-  got := RoundTrip(AMsg, AWpm, ANoise);
+  got := RoundTrip(AMsg, AWpm, ANoise, ALeadSec);
   Inc(TestCount);
   if got = AMsg then
     WriteLn(Format('  [OK] %s  [%s]', [AWhat, got]))
@@ -231,18 +232,128 @@ begin
   CheckRoundTrip('J1ABC', 12, 0.001, '英数混在');
 end;
 
+{ --------------------------------------------------------------------------
+  5. 受信系の整定過渡 (MDM-002)
+
+  FFT ローパスも移動平均も、動き始めは出力が 0 から本来の値へ単調に
+  上がってくる。この上がり方は「無音からトーンが始まった」のと区別が
+  つかないので、そのまま復号に渡すと先頭に余分な要素が生まれる。
+
+  過渡が最も露わになるのは **雑音が無いとき** である。雑音があれば
+  過渡はすぐ雑音に埋もれるが、無ければ立ち上がりがそのまま見えてしまう。
+  この場合が長らく唯一の不合格だった (C が < になっていた)。
+
+  前置きの無音を短くするのも同じ過渡を突く。受信を始めた直後に信号が
+  来る (途中から同調した) 状況で、整定を待つ余裕が無い。
+  -------------------------------------------------------------------------- }
+procedure TestSettlingTransient;
+begin
+  WriteLn;
+  WriteLn('--- 5. 受信系の整定過渡 (MDM-002) ---');
+  { 雑音を全く加えない。過渡が雑音に隠れない唯一の条件。 }
+  CheckRoundTrip('CQ DE JA1ABC K', 12, 0.0, '**雑音なし** (過渡が露わになる)');
+  CheckRoundTrip('A', 12, 0.0, '雑音なしで 1 文字 (A = .-)');
+  CheckRoundTrip('E', 12, 0.0, '雑音なしで 1 文字 (E = .)');
+
+  { 前置きの無音を削る。整定を待つ余裕が無い。 }
+  CheckRoundTrip('CQ DE JA1ABC K', 12, 0.001, '前置き 0.2 秒', 0.2);
+  CheckRoundTrip('CQ DE JA1ABC K', 12, 0.001, '前置き 0.05 秒', 0.05);
+  CheckRoundTrip('CQ DE JA1ABC K', 12, 0.001, '**前置きなし**', 0.0);
+  CheckRoundTrip('CQ DE JA1ABC K', 12, 0.05, '前置きなし + 雑音 0.05', 0.0);
+end;
+
+{ --------------------------------------------------------------------------
+  6. S/N を下げる
+
+  判定に「打鍵があるか」の門番を置くと、門番が厳しすぎれば弱い信号を
+  丸ごと落とす。門番の境目が高すぎないことを、信号と同程度の雑音で
+  確かめる。
+  -------------------------------------------------------------------------- }
+procedure TestLowSnr;
+begin
+  WriteLn;
+  WriteLn('--- 6. S/N を下げる ---');
+  CheckRoundTrip('CQ DE JA1ABC K', 12, 0.30, '雑音 0.30');
+  CheckRoundTrip('CQ DE JA1ABC K', 12, 0.60, '雑音 0.60');
+  CheckRoundTrip('CQ DE JA1ABC K', 12, 1.00, '雑音 1.00 (信号と同程度)');
+end;
+
+{ --------------------------------------------------------------------------
+  7. 雑音だけのときは何も出さないこと
+
+  試験 6 の裏側。門番を緩めれば弱い信号は通るが、雑音も通る。
+  両方を同時に要求することで、門番の境目が上下どちらにもずれていない
+  ことを縛る。片方だけでは、緩めるか厳しくするかで簡単に通ってしまう。
+  -------------------------------------------------------------------------- }
+procedure TestNoiseOnlyDecodesNothing;
+
+  procedure Run(ANoise: Double; const AWhat: string);
+  var
+    rxSound: TCaptureSoundDevice;
+    rx: TCwModem;
+    sink: TSink;
+    noise: array of Double;
+    i: Integer;
+    got: string;
+  begin
+    rxSound := TCaptureSoundDevice.Create;
+    rx := TCwModem.Create(rxSound);
+    sink := TSink.Create;
+    try
+      rx.Frequency := 700;
+      rx.SetCwSpeed(12);
+      rx.CwTrack := False;
+      rx.OnDecode := @sink.Decode;
+      SetLength(noise, rx.SampleRate * 10);   { 10 秒 }
+      for i := 0 to High(noise) do
+        noise[i] := ANoise * (Random - 0.5);
+      rx.RxProcess(noise, Length(noise));
+      got := Trim(sink.Text);
+      Inc(TestCount);
+      if got = '' then
+        WriteLn(Format('  [OK] %s', [AWhat]))
+      else
+      begin
+        WriteLn(Format('  [NG] %s', [AWhat]));
+        WriteLn(Format('        雑音だけなのに %d 文字出た: [%s]',
+          [Length(got), got]));
+        Inc(FailCount);
+      end;
+    finally
+      sink.Free;
+      rx.Free;
+      rxSound.Free;
+    end;
+  end;
+
+begin
+  WriteLn;
+  WriteLn('--- 7. 雑音だけのときは何も出さないこと ---');
+  Run(0.001, '雑音 0.001 を 10 秒');
+  Run(0.05,  '雑音 0.05 を 10 秒');
+  Run(0.20,  '雑音 0.20 を 10 秒');
+end;
+
 begin
   WriteLn('=== CW 先頭文字欠けの回帰試験 ===');
-  Randomize;
+  { Z-05 再現性: 実行ごとに結果が揺れると、直したのか運が良かったのかが
+    分からなくなる。種を固定する。 }
+  RandSeed := 20260831;
 
   TestLeadingCharacter;
   TestSpeeds;
   TestNoiseLevels;
   TestLongSymbols;
+  TestSettlingTransient;
+  TestLowSnr;
+  TestNoiseOnlyDecodesNothing;
 
   { §18 要求トレーサビリティ: 通ったときだけ被覆を申告する。 }
   if FailCount = 0 then
+  begin
     CoverReq('CMP-003');
+    CoverReq('MDM-002');
+  end;
 
   WriteLn;
   WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 (全 ', TestCount, ' 件中) ===');

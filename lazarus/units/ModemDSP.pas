@@ -188,6 +188,8 @@ type
     procedure Reset;
     { fldigi: double Cmovavg::run(double) }
     function Run(AValue: Double): Double;
+    { 平均長。呼び出し側が「フィルタが満ちるまで」を数えるために使う。 }
+    property Len: Integer read FLen;
   end;
 
   { TComplexLowpass
