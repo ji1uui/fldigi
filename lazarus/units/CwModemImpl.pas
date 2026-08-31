@@ -154,7 +154,6 @@ type
     FSigAvg: Double;                 // fldigi: sig_avg
     FNoiseFloor: Double;             // fldigi: noise_floor
     FLastSnrDb: Double;   // 直近の SNR (Evidence 用)
-    FSamplePos: Int64;    // Open からの通算サンプル数 (Replay 用)
     FAgcPeak: Double;                // fldigi: agc_peak
     FCwUpper, FCwLower: Double;      // fldigi: progdefaults.CWupper/CWlower (ヒステリシス閾値)
     FSigLevel: Double;               // fldigi: siglevel
@@ -326,13 +325,48 @@ procedure TCwModem.RxInit;
 begin
   // fldigi: cw::rx_init()
   FCwReceiveState := crsIdle;
-  FSmplCtr := 0;
   FRxRepBuf := '';
-  FAgcPeak := 0;
+  FUseDefaultWPM := False;
+
+  { 状態機械の時刻も消す。fldigi はこれらを handle_event() 内の static で
+    持っており、rx_init() では消えない。残っていると、次に流した音の
+    最初の語間空白が「前の音の終わりからの経過」で決まってしまう
+    (実測で、同じ区間を流し直すと先頭の空白だけ位置が変わった)。 }
+  FSmplCtr := 0;
+  FRrStartTs := 0;
+  FRrEndTs := 0;
+  FLastElement := 0;
+  FSpaceSent := False;
+
+  { 受信系を丸ごと初期状態に戻す。
+
+    fldigi の rx_init() は agc_peak を 0 にするだけで、フィルタの
+    遅延線には前の音が残る。生の受信では次の音がすぐ来るので目立たない
+    が、**同じ復調器に別の音を流し直す**と前の音の尾が新しい音の頭に
+    混ざり、同じ入力でも結果が変わる。実測で、同じインスタンスに同じ
+    区間を 4 回流すと 1 回目と 2〜4 回目で復号が違った。
+
+    Replay (X-06) と再現性 (Z-05) はこれでは成り立たないので、
+    RxInit を「受信系を初期状態に戻す」まで広げた。 }
+  FMixerFilt.Reset;
+  FBitFilter.Reset;
+  FTrackingFilter.Reset;
+  FMixerPhase := 0;
+  FSmplCtr := 0;
+
+  { 閾値追跡の推定量もコンストラクタと同じ値へ。0 のままだと
+    最初の非ゼロ標本で正規化が壊れる (README §27)。 }
+  FAgcPeak := 1.0;
+  FNoiseFloor := 1.0;
+  FSigAvg := 0.0;
+  FCwUpper := 0.6;
+  FCwLower := 0.4;
+  FSigLevel := 0;
+  FLastSnrDb := 0;
+
   FWarmupLeft := WarmupCalls;
   if FToneDetector <> nil then
     FToneDetector.Reset;
-  FUseDefaultWPM := False;
   EmitStatus(Format('CW Rx %d', [FCwReceiveSpeed]));
 end;
 
@@ -420,9 +454,10 @@ end;
 
 function TCwModem.WarmupCalls: Integer;
 begin
-  { FFT ローパスのインパルス応答 (CW_FFT_SIZE/2 サンプル) と
-    ビットフィルタ (FBitFilter.Len 回) の和。DecodeStream は
-    CW_DEC_RATIO に 1 回しか呼ばれないので、前者は割ってから足す。 }
+  { FFT ローパスのインパルス応答 (CW_FFT_SIZE/2 サンプル) が主。
+    DecodeStream は CW_DEC_RATIO に 1 回しか呼ばれないので割ってから使う。
+    ビットフィルタぶんは余裕として足す (実測では過渡は 41 回で終わって
+    いたので、64 + 25 = 89 回は十分な余裕がある)。 }
   Result := CW_FFT_SIZE div (2 * CW_DEC_RATIO);
   if FBitFilter <> nil then
     Result := Result + FBitFilter.Len;
@@ -655,7 +690,7 @@ begin
   ev := SingleCandidateEvidence(ACh, DecoderName);
   ev.HasSnr := True;
   ev.SnrDb := FLastSnrDb;
-  ev.SamplePos := FSamplePos;
+  ev.SamplePos := FStreamPos;
   EmitDecode(ev);
 end;
 
@@ -796,8 +831,9 @@ var
   FiltOut: TComplexArray;
   Value: Double;
 begin
-  { Replay / 再現のために通算サンプル位置を進める (X-06 の下地)。 }
-  Inc(FSamplePos, ALen);
+  { Replay / 再現のために通算サンプル位置を進める (X-06)。
+    基底クラスが持つ。Replay は流す前に StreamPosition を入れる。 }
+  AdvanceStreamPos(ALen);
   // fldigi: reset_rx_filter() (CWmfilt="整合フィルタ"モードは未実装のため、
   // Bandwidth プロパティの変更のみを検出条件とする)
   if Bandwidth <> FFiltBandwidth then
@@ -829,10 +865,15 @@ begin
 
       { 受信系の立ち上がり過渡は捨てる。
 
-        FFT ローパスも移動平均も、動き始めは出力が 0 から本来の値へ
-        単調に上がってくる。この上がり方は「無音からトーンが始まった」
-        のと区別がつかないため、そのまま復号に渡すと先頭に余分な
+        FFT ローパスは、入力が始まった瞬間から本来の値まで、
+        インパルス応答の長さをかけて出力が上がってくる。これは
+        フィルタとして正しい振る舞いだが、**段差であることに変わりは
+        ない**。段差で要素を見つける検出器には「無音からトーンが
+        始まった」のと区別がつかず、そのまま復号に渡すと先頭に余分な
         1 要素が生まれる (実測で 13 例中 12 例の先頭に T が付いた)。
+
+        (移動平均のほうは最初の標本で内部を埋めるので、こちらは
+        上がってこない。過渡はフィルタ側だけである。)
 
         過渡の長さはフィルタの長さで決まるので、そのぶんだけ捨てる。
         定常状態の振る舞いは何も変わらない。

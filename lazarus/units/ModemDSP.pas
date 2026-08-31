@@ -259,6 +259,14 @@ type
     { fldigi: int fftfilt::flush_size() }
     function FlushSize: Integer;
 
+    { 畳み込みの途中状態 (溜めかけの入力、持ち越し、出力) を捨てる。
+      フィルタ係数は保つので、作り直しより安い。
+
+      同じ復調器インスタンスに別の音を流し直すときに要る。消さないと
+      前の音の尾が新しい音の頭に混ざり、同じ入力でも結果が変わる
+      (AudioReplay の再現性 / Z-05)。 }
+    procedure Reset;
+
     property Flen: Integer read FFlen;
     property Flen2: Integer read FFlen2;
   end;
@@ -769,6 +777,24 @@ begin
   for i := 0 to FFlen2 - 1 do
     FOvlBuf[i] := CplxMake(0, 0);
   FInPtr := 0;
+  FPass := 1;
+end;
+
+procedure TFftFilt.Reset;
+var
+  i: Integer;
+begin
+  for i := 0 to FFlen - 1 do
+  begin
+    FTimeData[i] := CplxMake(0, 0);
+    FFreqData[i] := CplxMake(0, 0);
+    FOutput[i] := CplxMake(0, 0);
+  end;
+  for i := 0 to FFlen2 - 1 do
+    FOvlBuf[i] := CplxMake(0, 0);
+  FInPtr := 0;
+  { fldigi: create_filter() と同じく、次の 2 ブロックは捨てる。 }
+  FPass := 1;
 end;
 
 function TFftFilt.FSinc(AFc: Double; AI, ALen: Integer): Double;

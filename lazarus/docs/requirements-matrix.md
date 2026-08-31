@@ -54,7 +54,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | REQ-ID | 要求 | Exp | Obj | Pri | Sec | Ext | Prio | Verification | Status | 検証 | 出典 | ADR |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | RT-004 | 取り込みと復調をRing Bufferで分離する | Communicate | B | X | Z | No | Must | test_audioring (2スレッド通し番号照合) | 検証済 | ✓ | §4 X-01, §5.1 |  |
-| RT-005 | Audio History Bufferを保持しReplay Decodeを可能とする | Experiment | D | X | Y | No | Must | test_audioring (並行書込下の整合性) | 検証済 | ✓ | §4 X-06 |  |
+| RT-005 | Audio History Bufferを保持しReplay Decodeを可能とする | Experiment | D | X | Y | No | Must | test_audioring (並行書込下の整合性) / test_replay (流し直しの再現性) | 検証済 | ✓ | §4 X-06 |  |
 | RT-006 | CPU core数を正しく検出しWorker数の根拠にする | Communicate | C | X | - | No | Must | test_audioring (TThread比較) | 検証済 | ✓ | §4 X-03, X-07 | ADR-009 |
 | RT-007 | Audio I/O専用経路をDSP重処理から分離する | Communicate | B | X | Z | No | Must | test_capture (実時間デバイスで欠落を実測) | 検証済 | ✓ | §4 X-01 |  |
 | RT-008 | FFT等を共有サービス化し資源の重複を無くす | Communicate | C | X | Z | No | Should | test_fftshared (直接DFTとの照合・並行使用) | 検証済 | ✓ | §4 X-05 |  |

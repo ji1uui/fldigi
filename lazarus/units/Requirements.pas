@@ -662,7 +662,7 @@ begin
   R('RT-005', 'Audio History Bufferを保持しReplay Decodeを可能とする',
     expExperiment, objNewExperience, fndModernComputing,
     [fndIntelligentReceiver], False, priMust, 1,
-    'test_audioring (並行書込下の整合性)', rsVerified, '§4 X-06', '');
+    'test_audioring (並行書込下の整合性) / test_replay (流し直しの再現性)', rsVerified, '§4 X-06', '');
   R('RT-006', 'CPU core数を正しく検出しWorker数の根拠にする',
     expCommunicate, objPerformance, fndModernComputing, [],
     False, priMust, 1, 'test_audioring (TThread比較)', rsVerified,

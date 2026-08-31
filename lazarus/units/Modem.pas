@@ -135,9 +135,27 @@ type
       (ModemEngine が TxLoopStep を1本のワーカーで回す設計)。 }
   protected
     FTxSymbolBuf: array of Double;
+
+    { 入力の通算サンプル位置。RxProcess のたびに進める。
+
+      Evidence.SamplePos に載せて「この文字はどの音から出たか」を
+      上位へ伝えるためにある (X-06 Replay / Z-05 再現性)。
+
+      Replay では **元の音声の位置**を載せなければならない。履歴の
+      途中から流し込むときは、流す前に StreamPosition にその位置を
+      入れる (AudioReplay.pas がそうする)。派生クラスごとに private
+      で持っていたのを基底へ上げたのは、Replay が外から設定できる
+      必要があるためである。
+
+      RxInit では **リセットしない**。位置は音声側の座標であって
+      復調器の内部状態ではないので、復調器を初期化しても意味は変わらない。 }
+    FStreamPos: Int64;
   protected
     { 必要量を満たすまで伸ばす (縮めない)。 }
     procedure EnsureTxBuf(ANeeded: Integer);
+
+    { RxProcess の先頭で呼び、入力位置を進める。 }
+    procedure AdvanceStreamPos(ACount: Integer); inline;
 
     { 派生クラスから復調結果を上位へ渡す唯一の経路。
       fldigi: put_rx_char(c) に相当するが、運ぶのは文字ではなく Evidence。 }
@@ -247,6 +265,11 @@ type
     property Capabilities: TModemCapabilities read FCapabilities write FCapabilities;
     property StopFlag: Boolean read FStopFlag write FStopFlag;
 
+    { 入力の通算サンプル位置。Evidence.SamplePos に載る値。
+      Replay で履歴の途中から流すときは、流す前にその位置を入れる
+      (AudioReplay.TAudioReplay がそうする)。 }
+    property StreamPosition: Int64 read FStreamPos write FStreamPos;
+
     { --------------------------------------------------------------------
       GUI 層と接続するためのイベント (fldigi の REQ(...) 呼び出しに相当)
       -------------------------------------------------------------------- }
@@ -295,6 +318,11 @@ end;
 destructor TCustomModem.Destroy;
 begin
   inherited Destroy;
+end;
+
+procedure TCustomModem.AdvanceStreamPos(ACount: Integer);
+begin
+  Inc(FStreamPos, ACount);
 end;
 
 procedure TCustomModem.Init;

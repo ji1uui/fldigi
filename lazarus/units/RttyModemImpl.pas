@@ -109,7 +109,6 @@ type
     FLastMargin: Double;                 // 直近サンプルの正規化余裕
     FDataMargin: array[0..RTTY_MAXBITS-1] of Double; // データビットごとの余裕
     FLastSnrDb: Double;                  // 直近に算出した SNR (Evidence 用)
-    FSamplePos: Int64;                   // Open からの通算サンプル数 (Replay 用)
     FMarkEnv, FMarkNoise: Double;  // fldigi: mark_env, mark_noise
     FSpaceEnv, FSpaceNoise: Double;// fldigi: space_env, space_noise
     FNoiseFloor: Double;          // fldigi: noise_floor
@@ -352,6 +351,12 @@ begin
   FInpPtr := 0;
   FLastChar := 0;
 
+  { 受信系を初期状態に戻す。フィルタの遅延線に前の音が残っていると、
+    同じ音を流し直しても結果が変わる (X-06 Replay / Z-05 再現性)。
+    CW 側と同じ理由。 }
+  FMarkFilt.Reset;
+  FSpaceFilt.Reset;
+
   EmitStatus(GetModeName);
 end;
 
@@ -518,7 +523,7 @@ begin
   ev.SnrDb := FLastSnrDb;
   ev.HasFreqOffset := True;
   ev.FreqOffsetHz := FFreqErr;
-  ev.SamplePos := FSamplePos;
+  ev.SamplePos := FStreamPos;
 
   { 最も弱いビットを反転した文字を第2候補にする。
     余裕が十分ある (= 判定が明確) ときは候補を増やさない。
@@ -742,8 +747,9 @@ var
   MarkOut, SpaceOut: TComplexArray;
 begin
   ComputeMetric;
-  { Replay / 再現のために通算サンプル位置を進める (X-06 の下地)。 }
-  Inc(FSamplePos, ALen);
+  { Replay / 再現のために通算サンプル位置を進める (X-06)。
+    基底クラスが持つ。Replay は流す前に StreamPosition を入れる。 }
+  AdvanceStreamPos(ALen);
 
   for i := 0 to ALen - 1 do
   begin
