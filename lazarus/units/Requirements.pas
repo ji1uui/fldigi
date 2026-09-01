@@ -772,14 +772,29 @@ begin
     ここに並べておくのは、Phase 0 の設計がこれらを支えられているかを
     見るためである (支えられていなければ Phase 0 で直すべきだった)。
     ====================================================================== }
+  { --- 保留 (2026-08) ---
+    どちらも外部の暗号ライブラリを入れないと着手できない。方針は
+    ADR-003 で決まっており、容器 (SecureStore) も入っているので、
+    残っているのは中身の入れ替えだけである。
+
+    保留してよいと判断した根拠 (README §30):
+      - L6 は既定で無効 (SEC-002 検証済) で、保存には明示的承認が要る
+        (SEC-001 検証済)。既定の運用では L6 に何も書かれない。
+      - 保存形式は暗号化を前提に作ってある (SEC-004 検証済)。容器を
+        通す設計なので、入れ替えても呼び出し側は変わらない。
+    保留をやめる条件:
+      - L6 を既定で有効にするとき
+      - 保存先を利用者の管理下にない場所へ移すとき
+      - 実機配布を始めるとき
+    Context/L6 を実際に使い始める Phase 4 へ送る。 }
   R('ARC-005', 'L6 Persistent Memoryを実際に暗号化する',
     expCommunicate, objRobustness, fndEngineeringQuality, [],
-    False, priShould, 1, '外部ライブラリ導入後の往復試験', rsAccepted,
-    '§8.1', 'ADR-003');
+    False, priShould, 4, '外部ライブラリ導入後の往復試験', rsDeferred,
+    '§8.1。方針は決定済み、実装のみ保留 (README §30)', 'ADR-003');
   R('ARC-006', 'OSの鍵保管と連携する',
     expCommunicate, objRobustness, fndModernComputing, [],
-    False, priCould, 1, 'プラットフォーム別の結合試験', rsAccepted,
-    '§8.1', 'ADR-003');
+    False, priCould, 4, 'プラットフォーム別の結合試験', rsDeferred,
+    '§8.1。ARC-005 の後でなければ意味がない (README §30)', 'ADR-003');
   R('MDM-002', 'CW受信の整定過渡で先頭要素を失わない',
     expCommunicate, objRobustness, fndIntelligentReceiver,
     [fndEngineeringQuality], False, priShould, 1,

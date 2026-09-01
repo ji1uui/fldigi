@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 48 件 (検証済 34 / 実装済 0 / 方針決定 5 / 起案 5 / 後送り 4)
+要求 48 件 (検証済 34 / 実装済 0 / 方針決定 3 / 起案 5 / 後送り 6)
 
 ## Phase 0
 
@@ -58,8 +58,6 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | RT-006 | CPU core数を正しく検出しWorker数の根拠にする | Communicate | C | X | - | No | Must | test_audioring (TThread比較) | 検証済 | ✓ | §4 X-03, X-07 | ADR-009 |
 | RT-007 | Audio I/O専用経路をDSP重処理から分離する | Communicate | B | X | Z | No | Must | test_capture (実時間デバイスで欠落を実測) | 検証済 | ✓ | §4 X-01 |  |
 | RT-008 | FFT等を共有サービス化し資源の重複を無くす | Communicate | C | X | Z | No | Should | test_fftshared (直接DFTとの照合・並行使用) | 検証済 | ✓ | §4 X-05 |  |
-| ARC-005 | L6 Persistent Memoryを実際に暗号化する | Communicate | B | Z | - | No | Should | 外部ライブラリ導入後の往復試験 | 方針決定 |  | §8.1 | ADR-003 |
-| ARC-006 | OSの鍵保管と連携する | Communicate | B | X | - | No | Could | プラットフォーム別の結合試験 | 方針決定 |  | §8.1 | ADR-003 |
 | MDM-002 | CW受信の整定過渡で先頭要素を失わない | Communicate | B | Y | Z | No | Should | test_cw_leading (整定過渡・低S/N・雑音のみ) / test_cw_tone | 検証済 | ✓ | §3 A / §16。README §28 |  |
 
 ## Phase 2
@@ -80,6 +78,8 @@ Verification / Status。Primary Foundation は 1 つに限る。
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | GUI-014 | 低Confidence文字を視覚表示 | Communicate | D | Y | Z | No | Must | UI検証・ユーザーテスト | 起案 |  | §18 |  |
 | CTX-008 | Context補正をReject可能 | Communicate | D | Y | Z | No | Must | 機能・Undo回帰試験 | 起案 |  | §18 |  |
+| ARC-005 | L6 Persistent Memoryを実際に暗号化する | Communicate | B | Z | - | No | Should | 外部ライブラリ導入後の往復試験 | 後送り |  | §8.1。方針は決定済み、実装のみ保留 (README §30) | ADR-003 |
+| ARC-006 | OSの鍵保管と連携する | Communicate | B | X | - | No | Could | プラットフォーム別の結合試験 | 後送り |  | §8.1。ARC-005 の後でなければ意味がない (README §30) | ADR-003 |
 | CTX-002 | Contextは強い物理Evidenceを安易に上書きしない | Communicate | D | Y | - | No | Must | Context回帰試験 | 後送り |  | §7 |  |
 | CTX-003 | Confidenceを校正された確率として扱う | Communicate | D | Y | Z | No | Must | ECE / Brier Score / Reliability Diagram | 後送り |  | §7 CF-01, §17.1 | ADR-002 |
 | CTX-004 | L5登録条件をHigh Physical Confidence AND Format Validityとする | Communicate | D | Y | - | No | Must | Context回帰試験 | 後送り |  | §8, §19 ADR-008 |  |
