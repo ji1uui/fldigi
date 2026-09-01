@@ -817,10 +817,19 @@ begin
     'test_psk_varicode (往復・符号の形・長さ分布・一意性)', rsVerified,
     'fldigi src/psk/pskvaricode.cxx', '');
 
+  R('MDM-006', 'PSKがAFCで周波数ドリフトに追従する',
+    expCommunicate, objRobustness, fndIntelligentReceiver, [],
+    False, priShould, 3,
+    'test_regression (Frequency drift の上限を既知の限界から引き下げる)',
+    rsDeferred,
+    'Baseline Phase 3 Adaptive Receiver の AFC。実測: 60Hz ドリフトで ' +
+    'PSK31/63 は本文CER 0.79/0.86、CW と RTTY(AFC) は 0.00', '');
+
   R('MDM-001', '劣悪条件のTest vectorsで回帰試験を行う',
     expCommunicate, objRobustness, fndEngineeringQuality,
     [fndIntelligentReceiver], False, priMust, 2,
-    'Golden WAV BER/CER', rsDeferred, '§14 Z-02, §16', '');
+    'test_regression (4モード×10条件×8種の乱数でCER/BER)', rsVerified,
+    '§14 Z-02, §14.1, §16, §17', '');
   R('CTX-002', 'Contextは強い物理Evidenceを安易に上書きしない',
     expCommunicate, objNewExperience, fndIntelligentReceiver, [],
     False, priMust, 4, 'Context回帰試験', rsDeferred, '§7', '');

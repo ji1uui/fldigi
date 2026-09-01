@@ -18,6 +18,11 @@ unit ModemTypes;
 interface
 
 type
+  { 音声標本の並び。ユニットを跨いで波形を受け渡すのに使う。
+    (もとは test/TestSupport.pas にあったが、units/ 側からも要るように
+    なったのでここへ上げた。) }
+  TDoubleArray = array of Double;
+
   // fldigi: enum state_t "STATE_PAUSE, STATE_RX, STATE_TX, ..." (trx.h)
   TTrxState = (
     tsPause,

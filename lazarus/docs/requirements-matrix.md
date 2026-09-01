@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 51 件 (検証済 37 / 実装済 0 / 方針決定 3 / 起案 5 / 後送り 6)
+要求 52 件 (検証済 38 / 実装済 0 / 方針決定 3 / 起案 5 / 後送り 6)
 
 ## Phase 0
 
@@ -67,13 +67,14 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | MDM-003 | BPSK (PSK31/63/125) の送受信が成立する | Communicate | A | Y | Z | No | Must | test_psk (往復・雑音耐性・全印字文字) | 検証済 | ✓ | Baseline Phase 2 Practical Compatible Core |  |
 | MDM-004 | PSK復調が軟判定の尺度をEvidenceに載せる | Communicate | D | Y | Z | No | Should | test_psk (本文と雑音の余裕が分離することを実測) | 検証済 | ✓ | ADR-002 / §7 Phase 4 の Confidence の材料 | ADR-002 |
 | MDM-005 | PSK31 VaricodeがfldigiのTableと一致する | Communicate | A | Z | - | No | Must | test_psk_varicode (往復・符号の形・長さ分布・一意性) | 検証済 | ✓ | fldigi src/psk/pskvaricode.cxx |  |
-| MDM-001 | 劣悪条件のTest vectorsで回帰試験を行う | Communicate | B | Z | Y | No | Must | Golden WAV BER/CER | 後送り |  | §14 Z-02, §16 |  |
+| MDM-001 | 劣悪条件のTest vectorsで回帰試験を行う | Communicate | B | Z | Y | No | Must | test_regression (4モード×10条件×8種の乱数でCER/BER) | 検証済 | ✓ | §14 Z-02, §14.1, §16, §17 |  |
 
 ## Phase 3
 
 | REQ-ID | 要求 | Exp | Obj | Pri | Sec | Ext | Prio | Verification | Status | 検証 | 出典 | ADR |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | RTTY-021 | QSB時に複数復調戦略を比較 | Communicate | C | Y | X/Z | No | Must | Golden WAV BER/CER | 起案 |  | §18 | ADR-002 |
+| MDM-006 | PSKがAFCで周波数ドリフトに追従する | Communicate | B | Y | - | No | Should | test_regression (Frequency drift の上限を既知の限界から引き下げる) | 後送り |  | Baseline Phase 3 Adaptive Receiver の AFC。実測: 60Hz ドリフトで PSK31/63 は本文CER 0.79/0.86、CW と RTTY(AFC) は 0.00 |  |
 
 ## Phase 4
 

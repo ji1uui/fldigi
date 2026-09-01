@@ -24,8 +24,6 @@ uses
   Observability;
 
 type
-  TDoubleArray = array of Double;
-
   { --- ブロック処理時間の統計 ---
     v1.1 Z-04 Deterministic Realtime の判定に使う。
     平均 CPU 使用率ではなく「1ブロックの最悪処理時間」を見るのは、
