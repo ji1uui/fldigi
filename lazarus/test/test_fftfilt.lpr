@@ -18,6 +18,24 @@ program test_fftfilt;
 uses
   SysUtils, Math, ModemDSP;
 
+{ X-04 の確認に使う。確保の回数を数えるためにメモリマネージャを差し替える。 }
+var
+  GOldMM: TMemoryManager;
+  GCounting: Boolean = False;
+  GAllocCount: Integer = 0;
+
+function CountingGetMem(ASize: PtrUInt): Pointer;
+begin
+  if GCounting then Inc(GAllocCount);
+  Result := GOldMM.GetMem(ASize);
+end;
+
+function CountingReAllocMem(var P: Pointer; ASize: PtrUInt): Pointer;
+begin
+  if GCounting then Inc(GAllocCount);
+  Result := GOldMM.ReAllocMem(P, ASize);
+end;
+
 var
   FailCount: Integer = 0;
   TestCount: Integer = 0;
@@ -260,15 +278,217 @@ begin
     '回ブロック出力される (実際: ' + IntToStr(blockCount) + '回)');
 end;
 
+{ ==========================================================================
+  TFirFilter (fldigi: C_FIR_filter) の検証
+
+  PSK の受信経路が使う複素 FIR。畳み込みそのものを直接計算した値と
+  突き合わせる。**基準側を別に書く**のが要点で、同じ実装を 2 回書いて
+  比べても誤りは見つからない。
+  ========================================================================== }
+procedure TestFirConvolution;
+const
+  L = 8;      { 短い長さで直接計算と比べる }
+  N = 40;
+var
+  coef: array[0..L] of Double;
+  fir: TFirFilter;
+  inp: array[0..N-1] of TComplex;
+  i, k, idx, outCount, worstAt: Integer;
+  o: TComplex;
+  expI, expQ, err, worst: Double;
+begin
+  WriteLn;
+  WriteLn('--- TFirFilter: 直接畳み込みとの一致 ---');
+  for i := 0 to L do
+    coef[i] := 1.0 + i;          { 対称でない係数。順序の誤りが出る }
+  for i := 0 to N - 1 do
+    inp[i] := CplxMake(i + 1, -(i + 1) * 2);
+
+  fir := TFirFilter.Create(L, 1, coef, coef);
+  try
+    worst := 0; worstAt := -1; outCount := 0;
+    for i := 0 to N - 1 do
+    begin
+      if fir.Run(inp[i], o) then
+      begin
+        Inc(outCount);
+        { 基準: いま入れた標本を含めず、その手前 L 個を古い順に
+          係数 [0..L-1] と掛ける (fldigi の C_FIR_filter と同じ)。
+          範囲外は 0。 }
+        expI := 0; expQ := 0;
+        for k := 0 to L - 1 do
+        begin
+          idx := i - L + k;
+          if idx >= 0 then
+          begin
+            expI := expI + inp[idx].Re * coef[k];
+            expQ := expQ + inp[idx].Im * coef[k];
+          end;
+        end;
+        err := Abs(o.Re - expI) + Abs(o.Im - expQ);
+        if err > worst then begin worst := err; worstAt := i; end;
+      end;
+    end;
+    WriteLn(Format('        出力 %d 回 / 最大誤差 %.3g (第 %d 標本)',
+      [outCount, worst, worstAt]));
+    Check(outCount = N, '間引き 1 なら毎回出力する');
+    Check(worst < 1E-9,
+      '**直接畳み込みと一致する** (係数の順序も含めて)');
+  finally
+    fir.Free;
+  end;
+end;
+
+procedure TestFirDecimation;
+const
+  L = 4;
+var
+  coef: array[0..L] of Double;
+  fir: TFirFilter;
+  i, outCount: Integer;
+  o: TComplex;
+  gaps: string;
+begin
+  WriteLn;
+  WriteLn('--- TFirFilter: 間引き ---');
+  for i := 0 to L do coef[i] := 1.0;
+
+  fir := TFirFilter.Create(L, 4, coef, coef);
+  try
+    outCount := 0;
+    gaps := '';
+    for i := 1 to 20 do
+      if fir.Run(CplxMake(1, 0), o) then
+      begin
+        Inc(outCount);
+        gaps := gaps + IntToStr(i) + ' ';
+      end;
+    WriteLn('        出力した回数目: ', gaps);
+    Check(outCount = 5, '20 標本を間引き 4 で入れると 5 回出力する');
+    Check(gaps = '4 8 12 16 20 ', '**4 標本ごとちょうどに出力する**');
+  finally
+    fir.Free;
+  end;
+end;
+
+procedure TestFirReset;
+const
+  L = 6;
+var
+  coef: array[0..L] of Double;
+  fir: TFirFilter;
+  i: Integer;
+  o, first, again: TComplex;
+begin
+  WriteLn;
+  WriteLn('--- TFirFilter: Reset ---');
+  for i := 0 to L do coef[i] := 1.0 + i * 0.5;
+  fir := TFirFilter.Create(L, 1, coef, coef);
+  try
+    { 一度流して、Reset して同じものを流したら同じ出力になること。
+      残っていると Replay の再現性が崩れる (README §29)。 }
+    for i := 1 to 30 do
+      fir.Run(CplxMake(i, i), o);
+    first := o;
+
+    fir.Reset;
+    for i := 1 to 30 do
+      fir.Run(CplxMake(i, i), o);
+    again := o;
+
+    Check((Abs(first.Re - again.Re) < 1E-12) and
+          (Abs(first.Im - again.Im) < 1E-12),
+      '**Reset のあと同じ入力で同じ出力になる** (前の音が残らない)');
+
+    { Reset 直後は畳み込みの中身が 0 なので、最初の出力は 0 になる。 }
+    fir.Reset;
+    Check(fir.Run(CplxMake(1, 1), o), 'Reset 直後も出力は出る');
+    Check((Abs(o.Re) < 1E-12) and (Abs(o.Im) < 1E-12),
+      'Reset 直後の出力は 0 (緩衝が空)');
+  finally
+    fir.Free;
+  end;
+end;
+
+procedure TestFirNoAllocation;
+var
+  coef: array[0..64] of Double;
+  fir: TFirFilter;
+  i, n: Integer;
+  o: TComplex;
+  mm: TMemoryManager;
+begin
+  WriteLn;
+  WriteLn('--- TFirFilter: 確保しないこと (X-04) ---');
+  WSincFilter(coef, 1.0 / 16.0, 64);
+  fir := TFirFilter.Create(64, 1, coef, coef);
+  try
+    for i := 1 to 100 do fir.Run(CplxMake(1, 0), o);
+
+    GAllocCount := 0;
+    GetMemoryManager(GOldMM);
+    mm := GOldMM;
+    mm.GetMem := @CountingGetMem;
+    mm.ReAllocMem := @CountingReAllocMem;
+    SetMemoryManager(mm);
+    GCounting := True;
+    try
+      for i := 1 to 20000 do
+        fir.Run(CplxMake(Sin(i * 0.1), Cos(i * 0.1)), o);
+      n := GAllocCount;
+    finally
+      GCounting := False;
+      SetMemoryManager(GOldMM);
+    end;
+    Check(n = 0, Format('2 万回で確保 0 回 (実測 %d)', [n]));
+  finally
+    fir.Free;
+  end;
+end;
+
+procedure TestWSincFilter;
+var
+  coef: array[0..64] of Double;
+  i: Integer;
+  sum, peak: Double;
+  peakAt: Integer;
+begin
+  WriteLn;
+  WriteLn('--- WSincFilter: 係数の性質 ---');
+  WSincFilter(coef, 1.0 / 16.0, 64);
+  sum := 0;
+  peak := 0; peakAt := -1;
+  for i := 0 to 64 do
+  begin
+    sum := sum + coef[i];
+    if Abs(coef[i]) > peak then begin peak := Abs(coef[i]); peakAt := i; end;
+  end;
+  WriteLn(Format('        合計 %.6f / 最大 %.6f (第 %d 係数)', [sum, peak, peakAt]));
+  { 正規化してあるので直流利得は 1。 }
+  Check(Abs(sum - 1.0) < 1E-9, '**係数の合計が 1** (直流利得が 1 に正規化されている)');
+  { 中央が最大 (窓つき sinc なので対称)。 }
+  Check(peakAt = 32, '最大の係数が中央にある');
+  { 対称性。ここが崩れると位相が線形でなくなる。 }
+  sum := 0;
+  for i := 0 to 32 do
+    sum := sum + Abs(coef[i] - coef[64 - i]);
+  Check(sum < 1E-12, '**係数が左右対称** (位相が線形になる条件)');
+end;
+
 begin
   Randomize;
-  WriteLn('=== ComplexFFT/InverseComplexFFT (ModemDSP) / TFftFilt 検証 ===');
+  WriteLn('=== ComplexFFT/InverseComplexFFT (ModemDSP) / TFftFilt / TFirFilter 検証 ===');
 
   TestRoundTrip;
   TestKnownTransforms;
   TestTonePeak;
   TestFftFiltLowpass;
   TestFftFiltBlocking;
+  TestFirConvolution;
+  TestFirDecimation;
+  TestFirReset;
+  TestFirNoAllocation;
+  TestWSincFilter;
 
   WriteLn;
   WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 (全 ', TestCount, ' 件中) ===');

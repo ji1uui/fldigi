@@ -217,6 +217,67 @@ type
     Windowed-Sinc によるバンドパス/ローパス/ハイパス (CreateFilter/
     CreateLpf/CreateHpf) と、RTTY mark/space 用の周波数領域直接構成
     raised-cosine整合フィルタ (RttyFilter) の2種類のフィルタ形状に対応。 }
+  { TFirFilter
+    ---------------------------------------------------------------------
+    fldigi: class C_FIR_filter (filters.h / filters.cxx)
+
+    複素数入力・複素数出力の FIR フィルタ。間引き (decimation) 付き。
+    PSK の受信経路が使う (fir1 = 間引きフィルタ、fir2 = 整合フィルタ)。
+
+    fldigi の実装との違いと、同じにしたところ
+    ---------------------------------------------------------------------
+    fldigi は 4096 要素の直線緩衝を使い、末尾に達したら memmove で
+    先頭へ畳み込む。こちらは環状緩衝にした。**畳み込みの中身は同じ**で、
+    memmove が要らなくなるだけである。
+
+    ひとつ、意図して真似たところがある。fldigi は
+
+        ibuffer[pointer] = 入力;
+        ... mac(&ibuffer[pointer - length], filter, length)
+
+    と書いており、**いま入れた標本は畳み込みに入らない**。使われるのは
+    その 1 つ前までの length 個である。1 標本ぶん余計に遅れるが、
+    受信経路全体で見れば一定の遅れなので復号には影響しない。
+    ここを「直す」と fldigi と出力が 1 標本ずれるので、そのままにした
+    (test_fir が両者の一致を直接畳み込みと突き合わせて確かめている)。 }
+  TFirFilter = class
+  private
+    FLen: Integer;              // fldigi: length
+    FDecimate: Integer;         // fldigi: decimateratio
+    FCoefI, FCoefQ: array of Double;   // fldigi: ifilter, qfilter
+    FBuf: array of TComplex;    // 環状緩衝 (長さ FLen + 1)
+    FPos: Integer;              // 次に書く位置
+    FCounter: Integer;          // fldigi: counter
+  public
+    { ACoefI/ACoefQ は少なくとも ALen 要素を持つこと。
+      同じ係数を I/Q 両方に使う場合は同じ配列を渡してよい。 }
+    constructor Create(ALen, ADecimate: Integer;
+      const ACoefI, ACoefQ: array of Double);
+
+    { 途中状態を捨てる。係数は保つ。
+      同じインスタンスに別の音を流し直すときに要る (X-06 / Z-05)。 }
+    procedure Reset;
+
+    { 1 標本入れる。間引き比の回数に 1 回だけ True を返し、そのとき
+      AOut に出力を入れる。False のとき AOut は触らない。
+      確保しない (X-04)。
+      fldigi: int C_FIR_filter::run(const cmplx &in, cmplx &out) }
+    function Run(const AIn: TComplex; out AOut: TComplex): Boolean;
+
+    property Len: Integer read FLen;
+    property Decimate: Integer read FDecimate;
+  end;
+
+  { 窓関数つき sinc ローパスの係数を作る。
+    fldigi: wsincfilt() (pskcoeff.cxx)
+    ACoef は ALen + 1 要素を受け取れること。 }
+procedure WSincFilter(var ACoef: array of Double; AFc: Double;
+  ALen: Integer; ABlackman: Boolean = True);
+
+{ 二乗余弦の係数を作る。fldigi: raisedcosfilt() (pskcoeff.cxx) }
+procedure RaisedCosFilter(var ACoef: array of Double; ALen: Integer);
+
+type
   TFftFilt = class
   private
     FFlen: Integer;   // fldigi: flen
@@ -761,6 +822,132 @@ begin
   SetLength(FOutput, FFlen);
   SetLength(FOvlBuf, FFlen2);
   ClearFilter;
+end;
+
+{ TFirFilter }
+
+constructor TFirFilter.Create(ALen, ADecimate: Integer;
+  const ACoefI, ACoefQ: array of Double);
+var
+  i: Integer;
+begin
+  inherited Create;
+  if ALen < 1 then
+    raise EDspError.CreateFmt('FIR の長さは 1 以上である必要があります (指定: %d)',
+      [ALen]);
+  if ADecimate < 1 then
+    raise EDspError.CreateFmt('間引き比は 1 以上である必要があります (指定: %d)',
+      [ADecimate]);
+  if (Length(ACoefI) < ALen) or (Length(ACoefQ) < ALen) then
+    raise EDspError.CreateFmt(
+      '係数が足りません (要求 %d / I %d / Q %d)',
+      [ALen, Length(ACoefI), Length(ACoefQ)]);
+
+  FLen := ALen;
+  FDecimate := ADecimate;
+  SetLength(FCoefI, FLen);
+  SetLength(FCoefQ, FLen);
+  for i := 0 to FLen - 1 do
+  begin
+    FCoefI[i] := ACoefI[i];
+    FCoefQ[i] := ACoefQ[i];
+  end;
+  { 緩衝は「いま入れた 1 個」+「畳み込みに使う FLen 個」。 }
+  SetLength(FBuf, FLen + 1);
+  Reset;
+end;
+
+procedure TFirFilter.Reset;
+var
+  i: Integer;
+begin
+  for i := 0 to High(FBuf) do
+    FBuf[i] := CplxMake(0, 0);
+  FPos := 0;
+  FCounter := 0;
+end;
+
+function TFirFilter.Run(const AIn: TComplex; out AOut: TComplex): Boolean;
+var
+  k, idx, n: Integer;
+  sumI, sumQ: Double;
+begin
+  FBuf[FPos] := AIn;
+  Inc(FCounter);
+
+  Result := FCounter >= FDecimate;
+  if Result then
+  begin
+    { fldigi と同じく、いま入れた標本は使わない (クラスの説明を参照)。
+      古い順に係数 [0] から掛ける。 }
+    n := Length(FBuf);
+    idx := FPos - FLen;
+    while idx < 0 do Inc(idx, n);
+    sumI := 0;
+    sumQ := 0;
+    for k := 0 to FLen - 1 do
+    begin
+      sumI := sumI + FBuf[idx].Re * FCoefI[k];
+      sumQ := sumQ + FBuf[idx].Im * FCoefQ[k];
+      Inc(idx);
+      if idx >= n then idx := 0;
+    end;
+    AOut := CplxMake(sumI, sumQ);
+    FCounter := 0;
+  end;
+
+  Inc(FPos);
+  if FPos >= Length(FBuf) then
+    FPos := 0;
+end;
+
+procedure WSincFilter(var ACoef: array of Double; AFc: Double;
+  ALen: Integer; ABlackman: Boolean);
+var
+  i: Integer;
+  k1, k2, l2, normalize: Double;
+begin
+  { fldigi: void wsincfilt(double *firc, double fc, int len, bool blackman) }
+  k1 := 2.0 * Pi / ALen;
+  k2 := 2.0 * Pi * AFc;
+  l2 := ALen / 2.0;
+
+  for i := 0 to ALen do
+    { fldigi と同じく実数として突き合わせる。ALen が偶数のときだけ
+      中央 (i = ALen/2) で一致し、0 除算を避けるためにここが要る。
+      奇数のときは一致しないが、そのとき (i - l2) は 0 にならないので
+      除算も安全である。Round で丸めてしまうと、奇数のときに本来の値の
+      代わりに 1.0 を入れてしまう。 }
+    if i = l2 then
+      ACoef[i] := 1.0
+    else
+      ACoef[i] := Sin(k2 * (i - l2)) / (k2 * (i - l2));
+
+  if ABlackman then
+    for i := 0 to ALen do
+      ACoef[i] := ACoef[i] * (0.42 - 0.5 * Cos(k1 * i) + 0.08 * Cos(2.0 * k1 * i))
+  else
+    for i := 0 to ALen do
+      ACoef[i] := ACoef[i] * (0.54 - 0.46 * Cos(k1 * i));
+
+  normalize := 0;
+  for i := 0 to ALen do
+    normalize := normalize + ACoef[i];
+  if normalize <> 0 then
+    for i := 0 to ALen do
+      ACoef[i] := ACoef[i] / normalize;
+end;
+
+procedure RaisedCosFilter(var ACoef: array of Double; ALen: Integer);
+var
+  i: Integer;
+  k1, k2: Double;
+begin
+  { fldigi: void raisedcosfilt(double *firc, int len) }
+  k1 := Pi * 2.0 / ALen;
+  k2 := 2.0 * ALen;
+  for i := 0 to ALen do
+    ACoef[i] := (1.0 - Cos(k1 * i)) / k2;
 end;
 
 procedure TFftFilt.ClearFilter;

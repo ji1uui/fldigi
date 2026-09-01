@@ -64,7 +64,7 @@ const
     「そのフェーズに着手した」という宣言であって、完了の宣言ではない。
     上げた瞬間にそのフェーズの要求が「検証済」を名乗れるようになるので、
     実際に試験が申告しているかは test_requirements が突き合わせる。 }
-  CURRENT_PHASE = 1;
+  CURRENT_PHASE = 2;
 
 type
   ERequirementsError = class(Exception);
@@ -800,6 +800,22 @@ begin
     [fndEngineeringQuality], False, priShould, 1,
     'test_cw_leading (整定過渡・低S/N・雑音のみ) / test_cw_tone', rsVerified,
     '§3 A / §16。README §28', '');
+
+  R('MDM-003', 'BPSK (PSK31/63/125) の送受信が成立する',
+    expCommunicate, objCompatibility, fndIntelligentReceiver,
+    [fndEngineeringQuality], False, priMust, 2,
+    'test_psk (往復・雑音耐性・全印字文字)', rsVerified,
+    'Baseline Phase 2 Practical Compatible Core', '');
+  R('MDM-004', 'PSK復調が軟判定の尺度をEvidenceに載せる',
+    expCommunicate, objNewExperience, fndIntelligentReceiver,
+    [fndEngineeringQuality], False, priShould, 2,
+    'test_psk (本文と雑音の余裕が分離することを実測)', rsVerified,
+    'ADR-002 / §7 Phase 4 の Confidence の材料', 'ADR-002');
+  R('MDM-005', 'PSK31 VaricodeがfldigiのTableと一致する',
+    expCommunicate, objCompatibility, fndEngineeringQuality, [],
+    False, priMust, 2,
+    'test_psk_varicode (往復・符号の形・長さ分布・一意性)', rsVerified,
+    'fldigi src/psk/pskvaricode.cxx', '');
 
   R('MDM-001', '劣悪条件のTest vectorsで回帰試験を行う',
     expCommunicate, objRobustness, fndEngineeringQuality,

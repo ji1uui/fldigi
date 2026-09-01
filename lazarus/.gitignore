@@ -32,6 +32,8 @@ test/test_fftshared
 test/test_cw_tone
 test/test_cw_leading
 test/test_replay
+test/test_psk_varicode
+test/test_psk
 test/coverage/
 forms/DemoModemApp
 *.res
