@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 55 件 (検証済 40 / 実装済 0 / 方針決定 3 / 起案 5 / 後送り 7)
+要求 56 件 (検証済 40 / 実装済 1 / 方針決定 3 / 起案 5 / 後送り 7)
 
 ## Phase 0
 
@@ -23,8 +23,8 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | ARC-002 | Modem APIが複数候補とEvidenceを返せる | Communicate | D | Y | Z | No | Must | test_evidence | 検証済 | ✓ | §6, §19 ADR-002 | ADR-002 |
 | ARC-003 | Subscriber例外でEvent Bus全体を停止させない | Communicate | B | Z | - | No | Must | test_eventbus | 検証済 | ✓ | §12 | ADR-001 |
 | ARC-004 | 高頻度イベントで復調文字を押し出さない (conflation) | Communicate | B | Z | X | No | Should | test_eventbus / test_observability | 検証済 | ✓ | §12 | ADR-001 |
-| RT-001 | realtime経路で動的確保を行わない | Communicate | C | X | Z | No | Must | test_realtime (確保回数を実測) | 検証済 | ✓ | §4 X-04 | ADR-009 |
-| RT-002 | ブロック処理がdeadlineを守る | Communicate | C | X | Z | No | Must | test_realtime (deadline比) | 検証済 | ✓ | §14 Z-04 | ADR-009 |
+| RT-001 | realtime経路で動的確保を行わない | Communicate | C | X | Z | No | Must | test_realtime (**全モデム**の送受信経路で確保回数を実測) | 検証済 | ✓ | §4 X-04。モデムを足したら試験も足すこと (PSK を足したとき漏れた) | ADR-009 |
+| RT-002 | ブロック処理がdeadlineを守る | Communicate | C | X | Z | No | Must | test_realtime (**全モデム**の受信ブロックで deadline 比を実測) | 検証済 | ✓ | §14 Z-04。モデムを足したら試験も足すこと (PSK を足したとき漏れた) | ADR-009 |
 | RT-003 | 並行性は要求から導き、並列性は実測から導く | Communicate | C | X | - | No | Should | 実測 (README §16) | 方針決定 |  | §4 X-03 | ADR-009 |
 | OBS-001 | 障害診断のため出来事を時系列で残す | Communicate | B | Z | - | No | Must | test_observability | 検証済 | ✓ | §14 Z-01 | ADR-010 |
 | OBS-002 | 観測の記録が動的確保を行わない | Communicate | C | Z | X | No | Must | test_observability (確保回数を実測) | 検証済 | ✓ | §14 Z-01, X-04 | ADR-010 |
@@ -68,6 +68,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | MDM-004 | PSK復調が軟判定の尺度をEvidenceに載せる | Communicate | D | Y | Z | No | Should | test_psk (本文と雑音の余裕が分離することを実測) | 検証済 | ✓ | ADR-002 / §7 Phase 4 の Confidence の材料 | ADR-002 |
 | MDM-005 | PSK31 VaricodeがfldigiのTableと一致する | Communicate | A | Z | - | No | Must | test_psk_varicode (往復・符号の形・長さ分布・一意性) | 検証済 | ✓ | fldigi src/psk/pskvaricode.cxx |  |
 | QLT-001 | 試験をアプリと同じ検査設定 (範囲/オーバーフロー) で実行する | Communicate | B | Z | - | No | Must | test_regression ({$IFOPT} でビルド指定そのものを検査) | 検証済 | ✓ | §14 Z-02。アプリ側 .lpi は有効、試験は無効という食い違いがあった |  |
+| QLT-003 | 試験が解放漏れを起こさない | Communicate | B | Z | - | No | Must | run_tests.sh が heaptrc を常時有効にし、スイートごとの許容数と照合して超えたら失敗させる (試験バイナリからは申告できないため rsImplemented) | 実装済 |  | §14 Z-02。try..finally の欠落はこの言語で最も事故が多い形である |  |
 | QLT-002 | Test vectorsの波形が版を越えて同一である | Experiment | B | Z | - | No | Must | test_regression (乱数列と10分類の検査和を既知解で固定) | 検証済 | ✓ | §14.1 Golden WAV。同一性を謳いながら固定していなかった |  |
 | MDM-001 | 劣悪条件のTest vectorsで回帰試験を行う | Communicate | B | Z | Y | No | Must | test_regression (4モード×10条件×8種の乱数でCER/BER) | 検証済 | ✓ | §14 Z-02, §14.1, §16, §17 |  |
 

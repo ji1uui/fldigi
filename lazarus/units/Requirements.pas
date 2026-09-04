@@ -645,11 +645,16 @@ begin
   R('RT-001', 'realtime経路で動的確保を行わない',
     expCommunicate, objPerformance, fndModernComputing,
     [fndEngineeringQuality], False, priMust, 0,
-    'test_realtime (確保回数を実測)', rsVerified, '§4 X-04', 'ADR-009');
+    'test_realtime (**全モデム**の送受信経路で確保回数を実測)', rsVerified,
+    '§4 X-04。モデムを足したら試験も足すこと (PSK を足したとき漏れた)',
+    'ADR-009');
   R('RT-002', 'ブロック処理がdeadlineを守る',
     expCommunicate, objPerformance, fndModernComputing,
     [fndEngineeringQuality], False, priMust, 0,
-    'test_realtime (deadline比)', rsVerified, '§14 Z-04', 'ADR-009');
+    'test_realtime (**全モデム**の受信ブロックで deadline 比を実測)',
+    rsVerified,
+    '§14 Z-04。モデムを足したら試験も足すこと (PSK を足したとき漏れた)',
+    'ADR-009');
   R('RT-003', '並行性は要求から導き、並列性は実測から導く',
     expCommunicate, objPerformance, fndModernComputing, [], False,
     priShould, 0, '実測 (README §16)', rsAccepted, '§4 X-03', 'ADR-009');
@@ -825,6 +830,18 @@ begin
     False, priMust, 2,
     'test_regression ({$IFOPT} でビルド指定そのものを検査)', rsVerified,
     '§14 Z-02。アプリ側 .lpi は有効、試験は無効という食い違いがあった', '');
+  { 状態を rsVerified にしないのは、この表の定義では rsVerified が
+    「試験で固定した」を意味するからである。解放漏れの照合は試験
+    バイナリではなく run_tests.sh が行っており、CoverReq で申告できない。
+    実行のたびに強制されてはいるが、定義に合わせて rsImplemented とする。
+    過大に申告しない。 }
+  R('QLT-003', '試験が解放漏れを起こさない',
+    expCommunicate, objRobustness, fndEngineeringQuality, [],
+    False, priMust, 2,
+    'run_tests.sh が heaptrc を常時有効にし、スイートごとの許容数と照合して' +
+    '超えたら失敗させる (試験バイナリからは申告できないため rsImplemented)',
+    rsImplemented,
+    '§14 Z-02。try..finally の欠落はこの言語で最も事故が多い形である', '');
   R('QLT-002', 'Test vectorsの波形が版を越えて同一である',
     expExperiment, objRobustness, fndEngineeringQuality, [],
     False, priMust, 2,

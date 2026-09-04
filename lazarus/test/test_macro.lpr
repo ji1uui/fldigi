@@ -51,6 +51,13 @@ begin
   end;
 end;
 
+{ 文脈を作り直す。**前のものを手放してから**作る。
+
+  ctx := MakeContext; と書き直すと前の実体が宙に浮く。実際に
+  TestValidation と TestEdgeCases で 6 個ぶん漏れていた (heaptrc で発覚)。
+  作り直しは必ずこれを通す。 }
+procedure RemakeContext(var ACtx: TMacroContext); forward;
+
 function MakeContext: TMacroContext;
 begin
   Result := TMacroContext.Create;
@@ -72,6 +79,12 @@ begin
   Result.ContestName := 'ALL JA';
   { 2026-08-28 07:05 UTC に固定 (時計に依存しないため) }
   Result.FixedUtcNow := EncodeDateTime(2026, 8, 28, 7, 5, 0, 0);
+end;
+
+procedure RemakeContext(var ACtx: TMacroContext);
+begin
+  FreeAndNil(ACtx);
+  ACtx := MakeContext;
 end;
 
 { --------------------------------------------------------------------- }
@@ -248,30 +261,30 @@ begin
       '<CALL> を使わないマクロは相手が空でもエラーにしない');
 
     { 自局コールが空 }
-    ctx := MakeContext;
+    RemakeContext(ctx);   { 前のものを手放してから作り直す }
     ctx.MyCall := '';
     r := ex.Prepare('<TX>CQ de <MYCALL> k<RX>', ctx);
     Check(r.HasErrors, '自局コールが空ならエラー');
 
     { ログするのに内容が埋まっていない }
-    ctx := MakeContext;
+    RemakeContext(ctx);   { 前のものを手放してから作り直す }
     ctx.Call := '';
     r := ex.Prepare('<TX>TU<LOG><RX>', ctx);
     Check(r.HasErrors, '相手コールが空のままログしようとするとエラー');
 
-    ctx := MakeContext;
+    RemakeContext(ctx);   { 前のものを手放してから作り直す }
     ctx.RstRcvd := '';
     r := ex.Prepare('<TX>TU<LOG><RX>', ctx);
     Check(r.HasWarnings, '受信 RST が空のままログしようとすると警告');
 
     { 送信ナンバーが 0 以下 }
-    ctx := MakeContext;
+    RemakeContext(ctx);   { 前のものを手放してから作り直す }
     ctx.SerialOut := 0;
     r := ex.Prepare('<TX><#><RX>', ctx);
     Check(r.HasErrors, '送信ナンバーが 0 ならエラー');
 
     { 未知タグ }
-    ctx := MakeContext;
+    RemakeContext(ctx);   { 前のものを手放してから作り直す }
     r := ex.Prepare('<TX><NOSUCHTAG><RX>', ctx);
     Check(r.HasWarnings, '未知タグは既定で警告');
     CheckEq(r.PlainText, '<NOSUCHTAG>',
@@ -504,7 +517,7 @@ begin
     CheckEq(FormatSerial(7, 1), '7', 'FormatSerial: 1桁');
 
     { ClearWorkedStation は相手だけ消す }
-    ctx := MakeContext;
+    RemakeContext(ctx);   { 前のものを手放してから作り直す }
     ctx.ResetSerial(42);
     ctx.ClearWorkedStation;
     CheckEq(ctx.Call, '', '相手コールが消える');

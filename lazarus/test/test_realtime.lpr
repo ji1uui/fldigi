@@ -31,7 +31,7 @@ uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   Classes, SysUtils, Math,
   SoundIntf, ModemTypes, Modem, ModemDSP, DecodeEvidence,
-  RttyModemImpl, CwModemImpl, TestSupport, Requirements;
+  RttyModemImpl, CwModemImpl, PskModemImpl, TestSupport, Requirements;
 
 const
   { --- deadline に対する判定しきい値 (v1.1 Z-04) ---
@@ -386,11 +386,95 @@ begin
     [100 * MAX_PEAK_RATIO, 100 * st.MaxRatio]));
 end;
 
+{ PSK 送信: 記号ごとに波形バッファを確保していないこと。
+
+  **なぜ後から足したか**: RT-001 / RT-002 は Phase 0 の要求で「検証済」に
+  なっているが、この試験を書いた時点でモデムは RTTY と CW の 2 つだった。
+  Phase 2 で PSK を足したとき、ここに追加するのを忘れていた。
+  要求の状態は「検証済」のまま、実際の被覆だけが狭まっていた形である。
+  要求が全モデムを指している以上、モデムを足したらここも足す。 }
+procedure TestPskTxPathIsAllocationFree;
+var
+  snd: TCaptureSoundDevice;
+  tx: TPskModem;
+  src: TTxSource;
+  guard, res: Integer;
+  alloc: Int64;
+begin
+  WriteLn;
+  WriteLn('--- 5. PSK 送信経路 ---');
+  snd := TCaptureSoundDevice.Create;
+  tx := TPskModem.Create(snd, mmPSK31);
+  src := TTxSource.Create('CQ CQ DE JI1UUI K');
+  try
+    tx.Frequency := 1000;
+    tx.OnGetTxChar := @src.GetTxChar;
+    tx.TxInit;
+    tx.TxProcess;   { 1 文字ぶん先に流してバッファを確保させる }
+
+    BeginMeasure;
+    guard := 0;
+    repeat
+      res := tx.TxProcess;
+      Inc(guard);
+    until (res < 0) or (guard > 100000);
+    EndMeasure;
+    alloc := GGetMemCount + GReallocCount;
+
+    WriteLn(Format('  送信 %d サンプル: 確保 %d 回', [snd.Count, alloc]));
+    Check(alloc <= MAX_TX_ALLOC, Format(
+      '確保回数が送信量に比例しない (%d 回 / 上限 %d)', [alloc, MAX_TX_ALLOC]));
+  finally
+    src.Free; tx.Free; snd.Free;
+  end;
+end;
+
+procedure TestPskRxBlockIsAllocationFree;
+{ PSK 受信: 音声ブロックの処理そのものが確保しないこと。
+
+  文字が出た瞬間は Evidence (候補配列) を作るので確保が入る。ここで
+  見たいのは「文字が出ない普通のブロックで確保が走っていないか」なので、
+  位相反転の無い純音を流す (DCD が立たず文字も出ない)。 }
+var
+  snd: TCaptureSoundDevice;
+  rx: TPskModem;
+  buf: array[0..511] of Double;
+  i, k: Integer;
+  alloc: Int64;
+const
+  BLOCKS = 100;
+begin
+  WriteLn;
+  WriteLn('--- 6. PSK 受信ブロック処理 ---');
+  snd := TCaptureSoundDevice.Create;
+  rx := TPskModem.Create(snd, mmPSK31);
+  try
+    rx.Frequency := 1000;
+    rx.RxInit;
+    for i := 0 to High(buf) do
+      buf[i] := 0.5 * Sin(2 * Pi * 1000 * i / rx.SampleRate);
+    rx.RxProcess(buf, Length(buf));   { 初回のフィルタ確保を済ませる }
+
+    BeginMeasure;
+    for k := 1 to BLOCKS do
+      rx.RxProcess(buf, Length(buf));
+    EndMeasure;
+    alloc := GGetMemCount + GReallocCount;
+
+    WriteLn(Format('  %d ブロック復調: 確保 %d 回 (1ブロックあたり %.2f 回)',
+      [BLOCKS, alloc, alloc / BLOCKS]));
+    Check(alloc = 0, '受信ブロック処理で一切確保していない');
+  finally
+    rx.Free; snd.Free;
+  end;
+end;
+
 procedure TestRxDeadlineMargin;
 var
   snd: TCaptureSoundDevice;
   rx: TRttyModem;
   cw: TCwModem;
+  psk: TPskModem;
 begin
   snd := TCaptureSoundDevice.Create;
   rx := TRttyModem.Create(snd);
@@ -408,6 +492,14 @@ begin
     MeasureRxDeadline('CW', cw, 700);
   finally
     cw.Free;
+  end;
+
+  psk := TPskModem.Create(snd, mmPSK31);
+  try
+    psk.Frequency := 1000;
+    MeasureRxDeadline('PSK31', psk, 1000);
+  finally
+    psk.Free;
     snd.Free;
   end;
 end;
@@ -421,6 +513,8 @@ begin
     TestRttyTxPathIsAllocationFree;
     TestRttyRxBlockIsAllocationFree;
     TestCwTxPathIsAllocationFree;
+    TestPskTxPathIsAllocationFree;
+    TestPskRxBlockIsAllocationFree;
   finally
     RestoreMM;
   end;

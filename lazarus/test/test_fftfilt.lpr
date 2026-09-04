@@ -254,28 +254,32 @@ begin
   WriteLn('--- 5. TFftFilt.Run() のブロック化動作確認 (flen=', FLEN, ') ---');
 
   filt := TFftFilt.Create(FLEN);
-  filt.CreateLpf(0.1);
-  Check(filt.Flen = FLEN, 'Flen プロパティが指定通り');
-  Check(filt.Flen2 = FLEN div 2, 'Flen2 プロパティが Flen/2');
-  Check(filt.FlushSize = FLEN, '生成直後の FlushSize = Flen');
+  try
+    filt.CreateLpf(0.1);
+    Check(filt.Flen = FLEN, 'Flen プロパティが指定通り');
+    Check(filt.Flen2 = FLEN div 2, 'Flen2 プロパティが Flen/2');
+    Check(filt.FlushSize = FLEN, '生成直後の FlushSize = Flen');
 
-  zeroCount := 0;
-  blockCount := 0;
-  for i := 0 to FLEN * 4 - 1 do
-  begin
-    n := filt.Run(CplxMake(Random - 0.5, Random - 0.5), outBuf);
-    if n = 0 then
-      Inc(zeroCount)
-    else
+    zeroCount := 0;
+    blockCount := 0;
+    for i := 0 to FLEN * 4 - 1 do
     begin
-      Check(n = FLEN div 2, 'Run() が0以外を返す時は必ず Flen/2 個 (実際: ' + IntToStr(n) + ')');
-      Inc(blockCount);
+      n := filt.Run(CplxMake(Random - 0.5, Random - 0.5), outBuf);
+      if n = 0 then
+        Inc(zeroCount)
+      else
+      begin
+        Check(n = FLEN div 2, 'Run() が0以外を返す時は必ず Flen/2 個 (実際: ' + IntToStr(n) + ')');
+        Inc(blockCount);
+      end;
     end;
+    Check(zeroCount + blockCount = FLEN * 4,
+      '0を返した回数とブロックを返した回数の合計が投入サンプル数(反復回数)と一致する');
+    Check(blockCount = 4 * 2, IntToStr(FLEN * 4) + 'サンプル投入で ' + IntToStr(4*2) +
+      '回ブロック出力される (実際: ' + IntToStr(blockCount) + '回)');
+  finally
+    filt.Free;
   end;
-  Check(zeroCount + blockCount = FLEN * 4,
-    '0を返した回数とブロックを返した回数の合計が投入サンプル数(反復回数)と一致する');
-  Check(blockCount = 4 * 2, IntToStr(FLEN * 4) + 'サンプル投入で ' + IntToStr(4*2) +
-    '回ブロック出力される (実際: ' + IntToStr(blockCount) + '回)');
 end;
 
 { ==========================================================================

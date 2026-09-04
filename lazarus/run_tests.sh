@@ -22,9 +22,29 @@
 set -e
 cd "$(dirname "$0")"
 
-# -Cr 範囲検査 / -Ci I/O検査 / -Co オーバーフロー検査 / -gl 行番号つき追跡。
+# -Cr 範囲検査 / -Ci I/O検査 / -Co オーバーフロー検査 / -gl 行番号つき追跡
+# / -gh 解放漏れの検出 (heaptrc)。
 # アプリ側の .lpi と同じ検査を試験にも課す (上の説明を参照)。
-FPC_CHECKS="-Crio -gl"
+#
+# -gh を常時つけているのは、**解放漏れは静かに増える**からである。
+# 実測で 3 スイートが漏らしており、うち 2 つは try..finally の欠落
+# (この言語で最も事故が多い形) だった。追加費用は 22 秒中 0.8 秒。
+FPC_CHECKS="-Crio -gl -gh"
+
+# 解放漏れの許容数。0 が既定で、ここに挙げたものだけ例外にする。
+#
+# test_adif_full の 1 ブロック (70〜74 バイト) は、
+#   - 負荷を増やしても 1 のまま増えない
+#   - 試験をすべて外しても残る
+#   - 構成部品を個別に取り出すと再現しない
+# ところまで追ったが出所を特定できていない。実害は無い (終了時の
+# 1 ブロック) ので既知として記録し、**増えたら落ちる**ようにしてある。
+leak_baseline() {
+  case "$1" in
+    test_adif_full) echo 1 ;;
+    *) echo 0 ;;
+  esac
+}
 
 SUITES="test_contestlog test_fftfilt test_filter_switch test_opprofile \
 test_robustness test_rtty_cw test_station_adif test_adif_full \
@@ -89,20 +109,39 @@ SUITES="$SUITES $TRACE_SUITE"
 echo
 echo "=== 実行 ==="
 total_ng=0
+total_leak=0
 for t in $SUITES; do
   if [ ! -x "test/$t" ]; then continue; fi
-  out=$(./test/"$t" 2>&1) && rc=0 || rc=$?
+  # heaptrc は標準エラーへ出すので分けて受ける。
+  out=$(./test/"$t" 2>"/tmp/leak_$t.err") && rc=0 || rc=$?
   ng=$(printf '%s' "$out" | grep -c '\[NG\]' || true)
   total_ng=$((total_ng + ng))
   [ "$rc" -ne 0 ] && fail=1
-  printf '%-20s rc=%s NG=%s  %s\n' "$t" "$rc" "$ng" \
+
+  leaked=$(grep -oE '^[0-9]+ unfreed memory blocks' "/tmp/leak_$t.err" 2>/dev/null \
+    | grep -oE '^[0-9]+' || true)
+  [ -z "$leaked" ] && leaked=0
+  allowed=$(leak_baseline "$t")
+  leakmsg=""
+  if [ "$leaked" -gt "$allowed" ]; then
+    leakmsg=" 解放漏れ ${leaked}件(許容${allowed})"
+    total_leak=$((total_leak + leaked - allowed))
+    fail=1
+  fi
+
+  printf '%-20s rc=%s NG=%s%s  %s\n' "$t" "$rc" "$ng" "$leakmsg" \
     "$(printf '%s' "$out" | tail -1)"
 done
 
 echo
-if [ "$fail" -eq 0 ] && [ "$total_ng" -eq 0 ]; then
+if [ "$fail" -eq 0 ] && [ "$total_ng" -eq 0 ] && [ "$total_leak" -eq 0 ]; then
   echo "すべて成功"
 else
-  echo "失敗あり (NG 合計 $total_ng)"
+  if [ "$total_leak" -gt 0 ]; then
+    echo "失敗あり (NG 合計 $total_ng / 想定を超える解放漏れ $total_leak 件)"
+    echo "  追跡は /tmp/leak_<スイート名>.err を参照"
+  else
+    echo "失敗あり (NG 合計 $total_ng)"
+  fi
   exit 1
 fi
