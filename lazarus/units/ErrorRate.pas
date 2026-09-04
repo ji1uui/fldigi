@@ -28,6 +28,23 @@
   「復調が良くなった」ことになる。本文 CER だけを見ると、雑音を撒き
   散らす復調器が咎められない。両方を出して、両方に閾値を置く。
 
+  本文 CER の求め方 (窓探索)
+  ----------------------------------------------------------------------------
+  「復号文字列の中で参照に最も近い区間」を探す。素朴にやると、窓の長さと
+  開始位置を総当たりして毎回編集距離を計算することになり、参照 1134 文字で
+  1 回 449 ms かかった。Golden WAV の本来の用途は現実的な長さの交信記録
+  なので、これでは指標の計算のほうが復調より重くなる。
+
+  Sellers の近似文字列照合を使えば **1 回の DP で済む**。編集距離の表の
+  0 行目をすべて 0 にすると「B のどこから始めてもよい」を表せるので、
+  最終行の最小値がそのまま答えになる。同じ入力で 8 ms、56 倍速い。
+
+  総当たりと突き合わせたところ、無作為 4 万組で 330 件 (0.8%) 相違した。
+  **すべて Sellers のほうが小さい値**で、復号が参照よりずっと短いときに
+  限られる。総当たり側は窓の長さを参照 ±slack に制限していたため、
+  短い復号では窓を選べず全体と比べていた。Sellers に slack は要らず、
+  定義 (「最も近い区間」) に対してはこちらが正しい。
+
   ビット誤り率について
   ----------------------------------------------------------------------------
   本来の BER は変調記号の段で測るものだが、いまの Modem API は文字
@@ -67,16 +84,15 @@ function LevenshteinDistance(const A, B: string): Integer;
 
 { 全体 CER。復号文字列すべてを送信内容と比べる。ゴミも誤りとして数える。
   参照が空なら、復号が空のとき 0、そうでなければ 1 を返す。 }
+
 function CharErrorRate(const AReference, ADecoded: string): Double;
 
 { 本文 CER。ADecoded の中で AReference に最も近い区間を探し、その区間との
-  編集距離で測る。区間の長さは参照の長さの前後 ASlack 文字まで許す。 }
-function MessageCharErrorRate(const AReference, ADecoded: string;
-  ASlack: Integer = 8): Double;
+  編集距離で測る。区間の長さに制限は設けない (冒頭「窓探索」を参照)。 }
+function MessageCharErrorRate(const AReference, ADecoded: string): Double;
 
 { 上記をまとめて出す。 }
-function MeasureErrorRate(const AReference, ADecoded: string;
-  ASlack: Integer = 8): TErrorRateResult;
+function MeasureErrorRate(const AReference, ADecoded: string): TErrorRateResult;
 
 type
   { 複数回の試行をまとめた統計。Phase 3 で 2 つの復調戦略を比べるために
@@ -112,7 +128,7 @@ implementation
 
 function LevenshteinDistance(const A, B: string): Integer;
 var
-  prev, cur: array of Integer;
+  prev, cur, tmp: array of Integer;
   i, j, cost, t: Integer;
 begin
   if Length(A) = 0 then Exit(Length(B));
@@ -135,9 +151,85 @@ begin
       if prev[j - 1] + cost < t then t := prev[j - 1] + cost;  { 置換 }
       cur[j] := t;
     end;
-    prev := Copy(cur, 0, Length(cur));
+    { 動的配列は参照型なので、入れ替えれば済む。複製すると 1 行ごとに
+      確保が走る (窓探索の内側なので効く)。 }
+    tmp := prev; prev := cur; cur := tmp;
   end;
   Result := prev[Length(B)];
+end;
+
+{ AReference と、ADecoded の **任意の部分文字列** との最小編集距離。
+  一致した区間を AStart (1 起点) と ALen で返す。
+
+  Sellers の近似文字列照合。0 行目を 0 で埋めることで「どこから
+  始めてもよい」を表す。経路の開始位置も一緒に運ぶので、区間が分かる
+  (ビット比較に使う)。 }
+function BestWindowDistance(const AReference, ADecoded: string;
+  out AStart, ALen: Integer): Integer;
+var
+  prev, cur, prevS, curS, tmp: array of Integer;
+  i, j, cost, del, ins, sub, best, bestJ: Integer;
+begin
+  AStart := 1;
+  ALen := 0;
+  if Length(AReference) = 0 then Exit(0);
+  if Length(ADecoded) = 0 then Exit(Length(AReference));
+
+  SetLength(prev, Length(ADecoded) + 1);
+  SetLength(cur, Length(ADecoded) + 1);
+  SetLength(prevS, Length(ADecoded) + 1);
+  SetLength(curS, Length(ADecoded) + 1);
+
+  { 0 行目: どこから始めても費用 0。開始位置は自分自身。 }
+  for j := 0 to Length(ADecoded) do
+  begin
+    prev[j] := 0;
+    prevS[j] := j;
+  end;
+
+  for i := 1 to Length(AReference) do
+  begin
+    cur[0] := i;
+    curS[0] := 0;
+    for j := 1 to Length(ADecoded) do
+    begin
+      if AReference[i] = ADecoded[j] then cost := 0 else cost := 1;
+      del := prev[j] + 1;
+      ins := cur[j - 1] + 1;
+      sub := prev[j - 1] + cost;
+      { 開始位置は選んだ手の出所から引き継ぐ。 }
+      if (sub <= del) and (sub <= ins) then
+      begin
+        cur[j] := sub;
+        curS[j] := prevS[j - 1];
+      end
+      else if del <= ins then
+      begin
+        cur[j] := del;
+        curS[j] := prevS[j];
+      end
+      else
+      begin
+        cur[j] := ins;
+        curS[j] := curS[j - 1];
+      end;
+    end;
+    tmp := prev; prev := cur; cur := tmp;
+    tmp := prevS; prevS := curS; curS := tmp;
+  end;
+
+  best := prev[0];
+  bestJ := 0;
+  for j := 1 to Length(ADecoded) do
+    if prev[j] < best then
+    begin
+      best := prev[j];
+      bestJ := j;
+    end;
+
+  AStart := prevS[bestJ] + 1;
+  ALen := bestJ - prevS[bestJ];
+  Result := best;
 end;
 
 function CharErrorRate(const AReference, ADecoded: string): Double;
@@ -149,55 +241,20 @@ begin
   Result := LevenshteinDistance(AReference, ADecoded) / Length(AReference);
 end;
 
-function MessageCharErrorRate(const AReference, ADecoded: string;
-  ASlack: Integer): Double;
+function MessageCharErrorRate(const AReference, ADecoded: string): Double;
 var
-  refLen, start, len, d, best: Integer;
-  lo, hi: Integer;
+  st, ln: Integer;
 begin
   if Length(AReference) = 0 then
   begin
     if Length(ADecoded) = 0 then Exit(0) else Exit(1);
   end;
-  if Length(ADecoded) = 0 then Exit(1);
-
-  refLen := Length(AReference);
-  best := MaxInt;
-
-  lo := refLen - ASlack;
-  if lo < 1 then lo := 1;
-  hi := refLen + ASlack;
-  if hi > Length(ADecoded) then hi := Length(ADecoded);
-
-  { 参照と同じくらいの長さの窓を全位置で試す。復号が短ければ全体を見る。 }
-  if hi < lo then
-  begin
-    best := LevenshteinDistance(AReference, ADecoded);
-  end
-  else
-    for len := lo to hi do
-      for start := 1 to Length(ADecoded) - len + 1 do
-      begin
-        d := LevenshteinDistance(AReference, Copy(ADecoded, start, len));
-        if d < best then
-        begin
-          best := d;
-          if best = 0 then
-          begin
-            Result := 0;
-            Exit;
-          end;
-        end;
-      end;
-
-  Result := best / refLen;
+  Result := BestWindowDistance(AReference, ADecoded, st, ln) / Length(AReference);
 end;
 
-function MeasureErrorRate(const AReference, ADecoded: string;
-  ASlack: Integer): TErrorRateResult;
+function MeasureErrorRate(const AReference, ADecoded: string): TErrorRateResult;
 var
-  refLen, start, len, d, best, bestStart, bestLen: Integer;
-  lo, hi, i, k, x: Integer;
+  bestStart, bestLen, i, k, x: Integer;
   win: string;
 begin
   Result.RefLength := Length(AReference);
@@ -210,36 +267,22 @@ begin
   else
     Result.Cer := Result.Distance / Result.RefLength;
 
-  { 本文 CER と、そのときの窓を覚えてビット比較に使う。 }
-  refLen := Length(AReference);
-  best := MaxInt; bestStart := 1; bestLen := 0;
-  if (refLen > 0) and (Length(ADecoded) > 0) then
+  { 本文 CER と、そのときの区間。窓探索は BestWindowDistance に一本化して
+    ある (以前は MessageCharErrorRate と二重に書いていて、片方だけ直すと
+    二つの API が違う答えを返す形になっていた)。 }
+  Result.MessageDistance := BestWindowDistance(AReference, ADecoded,
+    bestStart, bestLen);
+  if Result.RefLength = 0 then
   begin
-    lo := refLen - ASlack; if lo < 1 then lo := 1;
-    hi := refLen + ASlack; if hi > Length(ADecoded) then hi := Length(ADecoded);
-    if hi < lo then
-    begin
-      best := LevenshteinDistance(AReference, ADecoded);
-      bestStart := 1; bestLen := Length(ADecoded);
-    end
-    else
-      for len := lo to hi do
-        for start := 1 to Length(ADecoded) - len + 1 do
-        begin
-          d := LevenshteinDistance(AReference, Copy(ADecoded, start, len));
-          if d < best then
-          begin
-            best := d; bestStart := start; bestLen := len;
-            if best = 0 then Break;
-          end;
-        end;
-  end;
-  if best = MaxInt then best := refLen;
-  Result.MessageDistance := best;
-  if refLen = 0 then
-    Result.MessageCer := 0
+    { 参照が空のときの約束は CharErrorRate と揃える。復号も空なら 0、
+      何か出ていれば 1。**以前はここだけ常に 0 を返していて**、
+      同じ状況で全体 CER が 1、本文 CER が 0 という食い違いが起きていた
+      (窓探索を二重に書いていたことの帰結。試験で見つかった)。 }
+    if Result.GotLength = 0 then Result.MessageCer := 0
+    else Result.MessageCer := 1;
+  end
   else
-    Result.MessageCer := best / refLen;
+    Result.MessageCer := Result.MessageDistance / Result.RefLength;
 
   { 届いた文字のビットを比べる。長さが違う分は比べようがないので、
     重なった分だけを見る (何を測っているかは冒頭の説明を参照)。 }

@@ -33,11 +33,17 @@ begin
   WriteLn('  [NG] ', AMsg);
 end;
 
+procedure Pass(const AMsg: string);
+begin
+  WriteLn('  [OK] ', AMsg);
+end;
+
 
 type
-  TDoubleArray = array of Double;
+  { TDoubleArray は ModemTypes が出す (以前はここで重ねて宣言していたが、
+    同名の別型になり、跨いで渡すと通らなくなるので外した)。
 
-  { TCaptureSoundDevice
+    TCaptureSoundDevice
     送信された波形サンプルをすべて内部バッファに蓄積するだけの
     テスト用サウンドデバイス。ReadSamples は無音(0.0)を返す。 }
   TRxSink = class
@@ -258,9 +264,48 @@ begin
   WriteLn;
 end;
 
+{ スケルチを解釈すると名乗っていないこと。
+
+  基底クラスは Squelch を全モデムに公開しているが、実際に解釈するのは
+  PSK だけである。CW は門番をトーン検出側に移したので持たず (README §28)、
+  RTTY は fldigi 由来の実装に無い。
+
+  **名乗るだけ名乗って実装しない**のを防ぐために、名乗らない側からも
+  縛る。実装したときはここを直すことになるので、印と中身がずれない。 }
+procedure RunSquelchCapabilityTest;
+var
+  snd: TCaptureSoundDevice;
+  cw: TCwModem;
+  rtty: TRttyModem;
+begin
+  WriteLn('--- Squelch を解釈するかの表明 ---');
+  snd := TCaptureSoundDevice.Create;
+  try
+    cw := TCwModem.Create(snd);
+    try
+      if mcSquelch in cw.Capabilities then
+        Fail('CW が mcSquelch を名乗っているが RxProcess は Squelch を見ていない')
+      else
+        Pass('CW は mcSquelch を名乗らない (門番はトーン検出側にある)');
+    finally cw.Free; end;
+
+    rtty := TRttyModem.Create(snd);
+    try
+      if mcSquelch in rtty.Capabilities then
+        Fail('RTTY が mcSquelch を名乗っているが実装が無い')
+      else
+        Pass('RTTY は mcSquelch を名乗らない');
+    finally rtty.Free; end;
+  finally
+    snd.Free;
+  end;
+  WriteLn;
+end;
+
 begin
   RunRttyLoopbackTest;
   RunCwLoopbackTest;
+  RunSquelchCapabilityTest;
   WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 ===');
 
   { §18 要求トレーサビリティ: 通ったときだけ被覆を申告する。 }

@@ -260,6 +260,9 @@ type
     property Bandwidth: Double read FBandwidth write SetBandwidth;
     property Reverse: Boolean read FReverse write FReverse;
     property Metric: Double read FMetric write SetMetric;
+    { スケルチの閾値。**これを解釈するかどうかはモデム次第**で、
+      mcSquelch が Capabilities に入っているモデムだけが見る。
+      入っていないモデムに設定しても何も起きない (0 = 門番なし)。 }
     property Squelch: Double read FSquelch write FSquelch;
     property SampleRate: Integer read FSampleRate write FSampleRate;
     property Capabilities: TModemCapabilities read FCapabilities write FCapabilities;

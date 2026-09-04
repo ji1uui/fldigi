@@ -234,9 +234,18 @@ end;
 
 function MakeSpec(AKind: TVectorKind; ASnrDb: Double): TVectorSpec;
 begin
-  FillChar(Result, SizeOf(Result), 0);
+  { FillChar を使わない。いまの TVectorSpec は数値と列挙だけなので安全だが、
+    string の欄を 1 つ足した瞬間に参照計数を減らさずポインタを潰して漏らす。
+    ErrorRate.pas で同じ誤りを踏んで直したので、こちらも揃えておく。 }
   Result.Kind := AKind;
   Result.SnrDb := ASnrDb;
+  Result.Depth := 0;
+  Result.RateHz := 0;
+  Result.OffsetHz := 0;
+  Result.Level := 0;
+  Result.PerSecond := 0;
+  Result.Ppm := 0;
+  Result.CarrierHz := 0;
   case AKind of
     vkExtremeQsb:
       begin

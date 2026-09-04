@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 54 件 (検証済 40 / 実装済 0 / 方針決定 3 / 起案 5 / 後送り 6)
+要求 55 件 (検証済 40 / 実装済 0 / 方針決定 3 / 起案 5 / 後送り 7)
 
 ## Phase 0
 
@@ -95,6 +95,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | REQ-ID | 要求 | Exp | Obj | Pri | Sec | Ext | Prio | Verification | Status | 検証 | 出典 | ADR |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | PLG-002 | 外部Modem Pluginをロード | Experiment | D | Z | X | Yes | Must | RTTY Plugin Acceptance | 起案 |  | §18 | ADR-004/005 |
+| MDM-007 | モードから復調器を作る窓口を一箇所に置く | Communicate | D | Z | - | Yes | Should | Plugin 登録機構と同じ表を使って全モードを生成できること | 後送り |  | 2026-09 の品質レビュー。PLG-002 の登録機構に合わせる | ADR-004 |
 
 ## Phase 6
 

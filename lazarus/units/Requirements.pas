@@ -831,6 +831,16 @@ begin
     'test_regression (乱数列と10分類の検査和を既知解で固定)', rsVerified,
     '§14.1 Golden WAV。同一性を謳いながら固定していなかった', '');
 
+  { 品質レビューで挙がったが、**いま作ると作り直しになる**ので送る。
+    Phase 5 の外部 Modem Plugin (PLG-002) が「Plugin が自分を登録する」
+    機構を定めるので、モードからクラスへの対応表はその形に合わせるべき
+    である。3 クラスのために別の機構を先に作ると二重になる。 }
+  R('MDM-007', 'モードから復調器を作る窓口を一箇所に置く',
+    expCommunicate, objNewExperience, fndEngineeringQuality, [],
+    True, priShould, 5,
+    'Plugin 登録機構と同じ表を使って全モードを生成できること', rsDeferred,
+    '2026-09 の品質レビュー。PLG-002 の登録機構に合わせる', 'ADR-004');
+
   R('MDM-006', 'PSKがAFCで周波数ドリフトに追従する',
     expCommunicate, objRobustness, fndIntelligentReceiver, [],
     False, priShould, 3,

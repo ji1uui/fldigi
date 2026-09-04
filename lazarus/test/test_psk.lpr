@@ -245,6 +245,15 @@ begin
       Check(Abs(m.BaudRate - 125.0) < 0.001, 'PSK125 は 125 ボー');
     finally m.Free; end;
 
+    { スケルチを解釈すると名乗っていること。基底クラスは Squelch を
+      全モデムに公開しているが、実際に見るのは PSK だけである。
+      名乗っていなければ、呼び出し側は設定が効くかどうか判断できない。 }
+    m := TPskModem.Create(snd, mmPSK31);
+    try
+      Check(mcSquelch in m.Capabilities,
+        '**PSK は mcSquelch を名乗る** (Squelch を実際に解釈する)');
+    finally m.Free; end;
+
     { 扱えないモードは受け付けない。黙って別のモードで動くより、
       作れないと言うほうがよい。 }
     Inc(TestCount);

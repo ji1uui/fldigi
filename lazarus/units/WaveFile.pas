@@ -37,6 +37,20 @@ interface
 uses
   SysUtils, Classes, Math, ModemTypes;
 
+const
+  { 受け付ける標本化周波数の範囲。範囲外は壊れたヘッダとみなす。
+    0 を通すと呼び出し側の割り算が落ちる。 }
+  WAVE_MIN_RATE = 1000;
+  WAVE_MAX_RATE = 768000;
+
+  { 受け付ける最大の標本数 (48 kHz で 1 時間)。
+
+    上限を置くのは、data の長さがヘッダから来る値だからである。
+    2 GB を超える長さを Integer で受けると溢れて負になり、負の長さで
+    読み出そうとする。**外部から来るファイルを読む関数**なので、
+    ヘッダの値をそのまま信用しない。 }
+  WAVE_MAX_FRAMES = 48000 * 60 * 60;
+
 type
   EWaveFileError = class(Exception);
 
@@ -146,6 +160,7 @@ var
   dataPos: Int64;
   dataSize: LongWord;
   i, frames: Integer;
+  frameCount: Int64;
   raw: array of SmallInt;
   skip: Int64;
 begin
@@ -188,8 +203,10 @@ begin
           fs.Seek(Int64(hdr.Size) - 16, soCurrent);
         fmtFound := True;
       end
-      else if hdr.Id = 'data' then
+      else if (hdr.Id = 'data') and (not dataFound) then
       begin
+        { data が複数あるファイルは最初のものを採る。後勝ちにすると
+          どれを読んだのか分からなくなる。 }
         dataPos := fs.Position;
         dataSize := hdr.Size;
         dataFound := True;
@@ -220,11 +237,21 @@ begin
     if (channels < 1) or (channels > 2) then
       raise EWaveFileError.CreateFmt(
         'モノラルかステレオのみ扱えます (%d ch)。', [channels]);
+    if (rate < WAVE_MIN_RATE) or (rate > WAVE_MAX_RATE) then
+      raise EWaveFileError.CreateFmt(
+        '標本化周波数が範囲外です (%d Hz。%d〜%d のみ扱えます)。',
+        [rate, WAVE_MIN_RATE, WAVE_MAX_RATE]);
 
     if dataPos + Int64(dataSize) > fs.Size then
       dataSize := LongWord(fs.Size - dataPos);
 
-    frames := dataSize div (2 * channels);
+    { ヘッダ由来の長さをそのまま Integer に入れない。先に 64 bit で
+      割ってから上限と突き合わせる。 }
+    frameCount := Int64(dataSize) div (2 * Int64(channels));
+    if frameCount > WAVE_MAX_FRAMES then
+      raise EWaveFileError.CreateFmt(
+        '長すぎます (%d 標本。上限 %d)。', [frameCount, WAVE_MAX_FRAMES]);
+    frames := Integer(frameCount);
     SetLength(raw, frames * channels);
     if frames > 0 then
     begin

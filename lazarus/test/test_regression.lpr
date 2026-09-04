@@ -48,7 +48,7 @@ program test_regression;
 
 uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
-  SysUtils, Math,
+  Classes, SysUtils, Math, DateUtils,
   SoundIntf, ModemTypes, Modem, ModemDSP,
   CwModemImpl, RttyModemImpl, PskModemImpl, DecodeEvidence,
   TestVectors, ErrorRate, WaveFile, TestSupport, Requirements;
@@ -166,6 +166,56 @@ begin
   r := MeasureErrorRate('AAAA', 'ACAA');
   CheckEqI(r.BitErrors, 1, '**A と C の違いは 1 bit** (文字単位より細かい)');
   CheckEqI(r.BitsCompared, 32, '4 文字ぶん 32 bit を比べている');
+
+  { 復号が参照よりずっと短いとき。以前は窓の長さを参照 ±8 に制限して
+    いたため窓を選べず全体と比べていたが、いまは最も近い部分文字列を
+    選ぶ (無作為 4 万組の差分試験で 0.8% がこの形で違っていた)。 }
+  r := MeasureErrorRate('ABCDEFGHIJKLMN', 'zzCDEFzz');
+  WriteLn('        ', r.Describe);
+  Check(r.MessageDistance <= 10,
+    '**復号が短くても最も近い区間を選ぶ** (窓の長さに制限を設けない)');
+
+  { 参照が空 / 復号が空の境界。 }
+  r := MeasureErrorRate('', '');
+  Check((r.Cer = 0) and (r.MessageCer = 0), '両方が空なら 0');
+  r := MeasureErrorRate('', 'abc');
+  Check((r.Cer = 1) and (r.MessageCer = 1), '参照だけ空なら 1');
+end;
+
+{ --------------------------------------------------------------------------
+  2b. 長い参照でも実用的な時間で終わること
+
+  Golden WAV の本来の用途は現実的な長さの交信記録である。窓探索を
+  総当たりで書いていたときは 1134 文字で 449 ms かかり、
+  4 モード × 10 条件 × 8 種なら指標の計算だけで 2 分を超えていた。
+  Sellers の 1 パス DP に置き換えて 11 ms になっている。
+
+  ここは時間を測る試験なので、機械の速さに左右されないよう **100 倍の
+  余裕**を取ってある。落ちるとすれば計算量が戻ったときである。
+  -------------------------------------------------------------------------- }
+procedure TestErrorRateScales;
+var
+  a, b: string;
+  i, ms: Integer;
+  t0: TDateTime;
+  r: TErrorRateResult;
+begin
+  WriteLn;
+  WriteLn('--- 2b. 長い参照での所要時間 ---');
+  a := '';
+  for i := 1 to 1134 do
+    a := a + Chr(65 + (i mod 26));
+  b := 'xy ' + a + ' zw';
+
+  t0 := Now;
+  r := MeasureErrorRate(a, b);
+  ms := MilliSecondsBetween(Now, t0);
+  WriteLn(Format('        参照 %d 文字 / 復号 %d 文字 -> %d ms (本文CER %.4f)',
+    [Length(a), Length(b), ms, r.MessageCer]));
+  Check(r.MessageCer = 0, '長い参照でも本文を正しく取り出す');
+  Check(ms < 1500,
+    Format('**1134 文字が 1.5 秒以内に終わる** (実測 %d ms。計算量が戻れば落ちる)',
+      [ms]));
 end;
 
 { 64 bit の定数を上下に分けて組み立てる。FPC は 2^63 以上の 16 進即値を
@@ -447,6 +497,133 @@ begin
     '**鏡像が 40 dB 以上小さい** (振幅変調ではなく周波数シフトになっている)');
 end;
 
+{ ヘッダの欄を指定して WAV を書く。壊れたファイルを作るために使う。 }
+procedure WriteRawWave(const AFileName: string; AFmtTag, AChannels, ABits: Word;
+  ARate, ADataSize: LongWord; AActualDataBytes: Integer);
+var
+  fs: TFileStream;
+  u32: LongWord;
+  u16: Word;
+  i: Integer;
+  b: Byte;
+
+  procedure Id(const A: string);
+  var
+    k: Integer;
+    c: AnsiChar;
+  begin
+    for k := 1 to 4 do
+    begin
+      c := A[k];
+      fs.WriteBuffer(c, 1);
+    end;
+  end;
+
+begin
+  fs := TFileStream.Create(AFileName, fmCreate);
+  try
+    Id('RIFF');
+    { RIFF 全体長。LoadWave は見ていないので、data が嘘の長さを名乗る
+      試験でも溢れないよう、実際に書いたバイト数から作る
+      (36 + ADataSize だと ADataSize が巨大なとき LongWord が溢れる。
+      範囲検査がそれを捕まえた)。 }
+    u32 := LongWord(36 + AActualDataBytes); fs.WriteBuffer(u32, 4);
+    Id('WAVE');
+    Id('fmt ');
+    u32 := 16; fs.WriteBuffer(u32, 4);
+    fs.WriteBuffer(AFmtTag, 2);
+    fs.WriteBuffer(AChannels, 2);
+    fs.WriteBuffer(ARate, 4);
+    u32 := LongWord(Int64(ARate) * AChannels * (ABits div 8));
+    fs.WriteBuffer(u32, 4);
+    u16 := AChannels * (ABits div 8); fs.WriteBuffer(u16, 2);
+    fs.WriteBuffer(ABits, 2);
+    Id('data');
+    fs.WriteBuffer(ADataSize, 4);
+    b := 0;
+    for i := 1 to AActualDataBytes do
+      fs.WriteBuffer(b, 1);
+  finally
+    fs.Free;
+  end;
+end;
+
+{ 壊れたヘッダを受け付けないこと。
+
+  WAV は **外部から来るファイル**である。「運用者が録った音を持ち込める」
+  ことが設計目標なので、ヘッダの値をそのまま信用してはいけない。 }
+procedure TestWaveFileRejectsBadHeaders;
+var
+  fn: string;
+  data: TDoubleArray;
+  raised: Boolean;
+
+  procedure ExpectReject(const AWhat: string);
+  var
+    raised: Boolean;
+    msg: string;
+  begin
+    raised := False;
+    msg := '';
+    try
+      LoadWave(fn, data);
+    except
+      on E: EWaveFileError do
+      begin
+        raised := True;
+        msg := E.Message;
+      end;
+    end;
+    if raised then
+      WriteLn('        断った理由: ', msg);
+    Check(raised, AWhat);
+  end;
+
+begin
+  WriteLn;
+  WriteLn('--- 7b. 壊れた WAV を受け付けないこと ---');
+  fn := GetTempDir + 'fldigi_lazarus_bad.wav';
+
+  { 標本化周波数 0。通すと呼び出し側の割り算が落ちる。 }
+  WriteRawWave(fn, 1, 1, 16, 0, 100, 100);
+  ExpectReject('**標本化周波数 0 を断る**');
+
+  { 非常識に高い標本化周波数。 }
+  WriteRawWave(fn, 1, 1, 16, 4000000, 100, 100);
+  ExpectReject('桁外れの標本化周波数を断る');
+
+  { data の長さがヘッダで 4 GB だが実体は 100 バイト。
+
+    これは **断るべきではない**。録音が途中で切れた・落とし損ねた
+    ファイルは実際にこうなるので、あるだけ返すほうが有用である。
+    危ないのは長さをそのまま Integer に入れて溢れさせることなので、
+    「溢れず、実体のぶんだけ返す」ことを確かめる。 }
+  WriteRawWave(fn, 1, 1, 16, 8000, $FFFFFFF0, 100);
+  raised := False;
+  try
+    LoadWave(fn, data);
+  except
+    on E: EWaveFileError do raised := True;
+  end;
+  Check(not raised, 'ヘッダが嘘の長さでも例外にしない (切れたファイルを許す)');
+  CheckEqI(Length(data), 50,
+    '**実体のぶんだけ返す** (100 バイト = 50 標本。溢れて負にならない)');
+
+  { 24 bit は扱わない。黙って変換すると原因を見落とす。 }
+  WriteRawWave(fn, 1, 1, 24, 8000, 300, 300);
+  ExpectReject('24 bit を断る');
+
+  { 非 PCM (圧縮)。 }
+  WriteRawWave(fn, 85, 1, 16, 8000, 100, 100);
+  ExpectReject('非圧縮 PCM でないものを断る');
+
+  { 5 チャンネル。 }
+  WriteRawWave(fn, 1, 5, 16, 8000, 100, 100);
+  ExpectReject('3 ch 以上を断る');
+
+  DeleteFile(fn);
+end;
+
 procedure TestWaveFileRoundTrip;
 const
   N = 5000;
@@ -499,6 +676,7 @@ begin
   Check(raised, '無いファイルは EWaveFileError になる');
 
   DeleteFile(fn);
+  TestWaveFileRejectsBadHeaders;
 end;
 
 procedure TestSignificance;
@@ -801,6 +979,7 @@ begin
   TestBuildFlags;
   TestLevenshtein;
   TestCerSemantics;
+  TestErrorRateScales;
   TestRandomDeterminism;
   TestKnownAnswers;
   TestSnrIsAchieved;

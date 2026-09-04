@@ -184,7 +184,8 @@ begin
 
   inherited Create(ASound, AMode);
   SampleRate := PSK_SAMPLE_RATE;
-  Capabilities := Capabilities + [mcRx, mcTx];
+  { mcSquelch: RxSymbol が Squelch を実際に見る (DCD の既定判定)。 }
+  Capabilities := Capabilities + [mcRx, mcTx, mcSquelch];
 
   SetupForMode(AMode);
   BuildFilters;
