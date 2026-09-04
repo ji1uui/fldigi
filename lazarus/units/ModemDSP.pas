@@ -72,6 +72,11 @@ function ClampF(AValue, AMin, AMax: Double): Double;
 { fldigi: misc.h の inline double sinc(double x) (正規化sinc関数) }
 function Sinc(AX: Double): Double;
 
+{ 2 の冪乗か。FFT 長の検証に使う。
+  (実装部に閉じていたが、FFT を使う側も同じ検証を必要とするので公開した。
+  同じ述語を各所で書き直すと、いずれ食い違う。) }
+function IsPowerOfTwo(AN: Integer): Boolean;
+
 type
   { DSP パラメータの誤りを表す例外 (FFT長が2の冪乗でない等)。 }
   EDspError = class(Exception);

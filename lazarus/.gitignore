@@ -34,6 +34,7 @@ test/test_cw_leading
 test/test_replay
 test/test_psk_varicode
 test/test_psk
+test/test_spectrum
 test/test_regression
 test/coverage/
 forms/DemoModemApp

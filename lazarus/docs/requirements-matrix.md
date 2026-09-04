@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 56 件 (検証済 40 / 実装済 1 / 方針決定 3 / 起案 5 / 後送り 7)
+要求 58 件 (検証済 41 / 実装済 1 / 方針決定 3 / 起案 5 / 後送り 8)
 
 ## Phase 0
 
@@ -57,7 +57,8 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | RT-005 | Audio History Bufferを保持しReplay Decodeを可能とする | Experiment | D | X | Y | No | Must | test_audioring (並行書込下の整合性) / test_replay (流し直しの再現性) | 検証済 | ✓ | §4 X-06 |  |
 | RT-006 | CPU core数を正しく検出しWorker数の根拠にする | Communicate | C | X | - | No | Must | test_audioring (TThread比較) | 検証済 | ✓ | §4 X-03, X-07 | ADR-009 |
 | RT-007 | Audio I/O専用経路をDSP重処理から分離する | Communicate | B | X | Z | No | Must | test_capture (実時間デバイスで欠落を実測) | 検証済 | ✓ | §4 X-01 |  |
-| RT-008 | FFT等を共有サービス化し資源の重複を無くす | Communicate | C | X | Z | No | Should | test_fftshared (直接DFTとの照合・並行使用) | 検証済 | ✓ | §4 X-05 |  |
+| RT-008 | FFTの係数表を共有サービス化し資源の重複を無くす | Communicate | C | X | Z | No | Should | test_fftshared (直接DFTとの照合・並行使用) | 検証済 | ✓ | §4 X-05 |  |
+| SPC-001 | スペクトルを共有サービス化し複数の読み手に同じ枠を配る | Communicate | C | X | Y | No | Must | test_spectrum (既知正弦波の絶対値・複数読み手の一致・取りこぼしの申告・窓とFFT長に依らない雑音密度) | 検証済 | ✓ | §4 X-05, §5.1 | ADR-001 |
 | MDM-002 | CW受信の整定過渡で先頭要素を失わない | Communicate | B | Y | Z | No | Should | test_cw_leading (整定過渡・低S/N・雑音のみ) / test_cw_tone | 検証済 | ✓ | §3 A / §16。README §28 |  |
 
 ## Phase 2
@@ -77,6 +78,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | REQ-ID | 要求 | Exp | Obj | Pri | Sec | Ext | Prio | Verification | Status | 検証 | 出典 | ADR |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | RTTY-021 | QSB時に複数復調戦略を比較 | Communicate | C | Y | X/Z | No | Must | Golden WAV BER/CER | 起案 |  | §18 | ADR-002 |
+| SPC-002 | 雑音推定を共有サービス化し全戦略が同じ雑音床を見る | Communicate | B | Y | X | No | Must | SPC-001 の電力密度を用いた雑音床推定の較正試験 (Phase 3) | 後送り |  | §4 X-05 |  |
 | MDM-006 | PSKがAFCで周波数ドリフトに追従する | Communicate | B | Y | - | No | Should | test_regression (Frequency drift の上限を既知の限界から引き下げる) | 後送り |  | Baseline Phase 3 Adaptive Receiver の AFC。実測: 60Hz ドリフトで PSK31/63 は本文CER 0.79/0.86、CW と RTTY(AFC) は 0.00 |  |
 
 ## Phase 4

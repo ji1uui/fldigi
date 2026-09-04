@@ -678,10 +678,28 @@ begin
     [fndEngineeringQuality], False, priMust, 1,
     'test_capture (実時間デバイスで欠落を実測)', rsVerified, '§4 X-01', '');
 
-  R('RT-008', 'FFT等を共有サービス化し資源の重複を無くす',
+  { X-05 は「FFT、Noise Estimator、Spectrum 等を共有サービス化する」である。
+    RT-008 は当初「FFT等」と書いて検証済にしていたが、実際に共有していたのは
+    FFT の係数表だけだった。「等」で三つを覆うと、覆われた側が実装されなくても
+    検証済のまま残る —— RT-001/RT-002 が PSK を取りこぼしたのと同じ形である。
+    そこで X-05 を三つに割り、それぞれに要求を立てた。
+      RT-008  FFT の係数表   Phase 1 済
+      SPC-001 Spectrum       Phase 1 (Phase 2 の作業中に実施)
+      SPC-002 Noise Estimator Phase 3 (未着手であることを見えるようにする) }
+  R('RT-008', 'FFTの係数表を共有サービス化し資源の重複を無くす',
     expCommunicate, objPerformance, fndModernComputing,
     [fndEngineeringQuality], False, priShould, 1,
     'test_fftshared (直接DFTとの照合・並行使用)', rsVerified, '§4 X-05', '');
+  R('SPC-001', 'スペクトルを共有サービス化し複数の読み手に同じ枠を配る',
+    expCommunicate, objPerformance, fndModernComputing,
+    [fndIntelligentReceiver], False, priMust, 1,
+    'test_spectrum (既知正弦波の絶対値・複数読み手の一致・取りこぼしの申告・' +
+    '窓とFFT長に依らない雑音密度)', rsVerified, '§4 X-05, §5.1', 'ADR-001');
+  R('SPC-002', '雑音推定を共有サービス化し全戦略が同じ雑音床を見る',
+    expCommunicate, objRobustness, fndIntelligentReceiver,
+    [fndModernComputing], False, priMust, 3,
+    'SPC-001 の電力密度を用いた雑音床推定の較正試験 (Phase 3)', rsDeferred,
+    '§4 X-05', '');
 
   R('OBS-001', '障害診断のため出来事を時系列で残す',
     expCommunicate, objRobustness, fndEngineeringQuality, [],
