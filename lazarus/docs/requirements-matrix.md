@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 52 件 (検証済 38 / 実装済 0 / 方針決定 3 / 起案 5 / 後送り 6)
+要求 54 件 (検証済 40 / 実装済 0 / 方針決定 3 / 起案 5 / 後送り 6)
 
 ## Phase 0
 
@@ -67,6 +67,8 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | MDM-003 | BPSK (PSK31/63/125) の送受信が成立する | Communicate | A | Y | Z | No | Must | test_psk (往復・雑音耐性・全印字文字) | 検証済 | ✓ | Baseline Phase 2 Practical Compatible Core |  |
 | MDM-004 | PSK復調が軟判定の尺度をEvidenceに載せる | Communicate | D | Y | Z | No | Should | test_psk (本文と雑音の余裕が分離することを実測) | 検証済 | ✓ | ADR-002 / §7 Phase 4 の Confidence の材料 | ADR-002 |
 | MDM-005 | PSK31 VaricodeがfldigiのTableと一致する | Communicate | A | Z | - | No | Must | test_psk_varicode (往復・符号の形・長さ分布・一意性) | 検証済 | ✓ | fldigi src/psk/pskvaricode.cxx |  |
+| QLT-001 | 試験をアプリと同じ検査設定 (範囲/オーバーフロー) で実行する | Communicate | B | Z | - | No | Must | test_regression ({$IFOPT} でビルド指定そのものを検査) | 検証済 | ✓ | §14 Z-02。アプリ側 .lpi は有効、試験は無効という食い違いがあった |  |
+| QLT-002 | Test vectorsの波形が版を越えて同一である | Experiment | B | Z | - | No | Must | test_regression (乱数列と10分類の検査和を既知解で固定) | 検証済 | ✓ | §14.1 Golden WAV。同一性を謳いながら固定していなかった |  |
 | MDM-001 | 劣悪条件のTest vectorsで回帰試験を行う | Communicate | B | Z | Y | No | Must | test_regression (4モード×10条件×8種の乱数でCER/BER) | 検証済 | ✓ | §14 Z-02, §14.1, §16, §17 |  |
 
 ## Phase 3

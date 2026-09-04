@@ -817,6 +817,20 @@ begin
     'test_psk_varicode (往復・符号の形・長さ分布・一意性)', rsVerified,
     'fldigi src/psk/pskvaricode.cxx', '');
 
+  { --- 品質工学 (2026-09 のレビューで判明した欠落) ---
+    Phase 2 で登録するのは、実際にこのフェーズで手を入れたからである。
+    Phase 0/1 に遡って足すと「そのとき済んでいた」という嘘になる。 }
+  R('QLT-001', '試験をアプリと同じ検査設定 (範囲/オーバーフロー) で実行する',
+    expCommunicate, objRobustness, fndEngineeringQuality, [],
+    False, priMust, 2,
+    'test_regression ({$IFOPT} でビルド指定そのものを検査)', rsVerified,
+    '§14 Z-02。アプリ側 .lpi は有効、試験は無効という食い違いがあった', '');
+  R('QLT-002', 'Test vectorsの波形が版を越えて同一である',
+    expExperiment, objRobustness, fndEngineeringQuality, [],
+    False, priMust, 2,
+    'test_regression (乱数列と10分類の検査和を既知解で固定)', rsVerified,
+    '§14.1 Golden WAV。同一性を謳いながら固定していなかった', '');
+
   R('MDM-006', 'PSKがAFCで周波数ドリフトに追従する',
     expCommunicate, objRobustness, fndIntelligentReceiver, [],
     False, priShould, 3,

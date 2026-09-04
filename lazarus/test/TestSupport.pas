@@ -103,6 +103,17 @@ type
 
 { 単調増加の高分解能時刻 (秒)。
   1ブロックは 0.5ms 程度なので GetTickCount64 (ミリ秒) では粒度が足りない。 }
+{ このユニットが範囲検査・オーバーフロー検査つきでコンパイルされたか。
+
+  {$IFOPT} はコンパイル時に評価されるので、**ビルド指定を試験から確かめる**
+  ことができる。run_tests.sh が検査を外したら、これが False になって
+  試験が落ちる。シェルスクリプトの中身は誰も読まないが、落ちる試験は読む。
+
+  TestSupport はすべてのスイートと同じ指定でコンパイルされるので、
+  ここで見れば全体の設定が分かる。 }
+function BuildHasRangeChecks: Boolean;
+function BuildHasOverflowChecks: Boolean;
+
 function HiResSeconds: Double;
 
 { 測定値の配列から統計を作る (AMs は各ブロックの処理時間[ms])。 }
@@ -113,6 +124,24 @@ implementation
 
 { 高分解能時刻は製品側 (Observability) の実装を使う。
   テストが独自に持つと、測っているものが製品と違う可能性が残る。 }
+function BuildHasRangeChecks: Boolean;
+begin
+{$IFOPT R+}
+  Result := True;
+{$ELSE}
+  Result := False;
+{$ENDIF}
+end;
+
+function BuildHasOverflowChecks: Boolean;
+begin
+{$IFOPT Q+}
+  Result := True;
+{$ELSE}
+  Result := False;
+{$ENDIF}
+end;
+
 function HiResSeconds: Double;
 begin
   Result := ObsHiResSeconds;

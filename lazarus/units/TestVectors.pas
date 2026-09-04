@@ -148,6 +148,12 @@ begin
   FState := ASeed;
 end;
 
+{$push}
+{$Q-}{$R-}
+{ xorshift も FNV も、**折り返しが仕組みの一部**である (乗算の上位ビットを
+  捨てることで混ぜている)。アプリ側は検査を有効にしているので、ここが
+  宣言されていないと EIntOverflow で落ちる。切るのはこの 2 つの関数だけ。 }
+
 function TVectorRandom.NextU64: QWord;
 begin
   { xorshift64* (Vigna)。 }
@@ -156,6 +162,8 @@ begin
   FState := FState xor (FState shr 27);
   Result := FState * QWord($2545F4914F6CDD1D);   { 2685821657736338717 }
 end;
+
+{$pop}
 
 function TVectorRandom.NextFloat: Double;
 begin
@@ -518,6 +526,9 @@ begin
   end;
 end;
 
+{$push}
+{$Q-}{$R-}   { FNV-1a の乗算は 2^64 で折り返すのが仕様 (NextU64 と同じ理由) }
+
 function WaveChecksum(const AWave: array of Double; ALen: Integer): QWord;
 var
   i: Integer;
@@ -533,5 +544,7 @@ begin
     Result := Result * QWord($100000001B3);   { FNV-1a prime }
   end;
 end;
+
+{$pop}
 
 end.

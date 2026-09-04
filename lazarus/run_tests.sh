@@ -9,9 +9,22 @@
 #   実際にこれで「直したはずのテストが失敗する」「壊したはずなのに通る」
 #   という誤った結果を一度出している。
 #   スイートごとに中間物を消してからビルドすることで、この取りこぼしを防ぐ。
+#
+# なぜ検査つきでビルドするか:
+#   アプリ側 (forms/DemoModemApp.lpi) は範囲検査・オーバーフロー検査・
+#   I/O 検査を有効にしている。試験だけ無効で走らせていると、
+#   **配列外アクセスがあっても試験は通り、アプリでだけ落ちる**。
+#   実際、有効にして回したら 29 スイート中 4 つが落ちた (SHA-256 と
+#   乱数の折り返し演算が未宣言だった)。宣言を入れて全数通してある。
+#   -gl は行番号つきの追跡を出す。検査が発火したとき番地だけでは
+#   原因に辿り着けない。
 # ============================================================================
 set -e
 cd "$(dirname "$0")"
+
+# -Cr 範囲検査 / -Ci I/O検査 / -Co オーバーフロー検査 / -gl 行番号つき追跡。
+# アプリ側の .lpi と同じ検査を試験にも課す (上の説明を参照)。
+FPC_CHECKS="-Crio -gl"
 
 SUITES="test_contestlog test_fftfilt test_filter_switch test_opprofile \
 test_robustness test_rtty_cw test_station_adif test_adif_full \
@@ -32,7 +45,7 @@ clean() {
 
 build_one() {
   clean
-  fpc -Fuunits -Futest -FEtest -o"$1" "test/$1.lpr" > "/tmp/build_$1.log" 2>&1
+  fpc $FPC_CHECKS -Fuunits -Futest -FEtest -o"$1" "test/$1.lpr" > "/tmp/build_$1.log" 2>&1
 }
 
 fail=0

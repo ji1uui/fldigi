@@ -86,6 +86,30 @@ end;
   第 1 部: 物差しの検査
   ========================================================================== }
 
+{ --------------------------------------------------------------------------
+  0. ビルド指定そのものの検査 (QLT-001)
+
+  アプリ側 (forms/DemoModemApp.lpi) は範囲検査・オーバーフロー検査を
+  有効にしている。試験だけ無効で走らせると、**配列外アクセスがあっても
+  試験は通り、アプリでだけ落ちる**。
+
+  実際に有効化して回したら 29 スイート中 4 つが落ちた。原因は SHA-256 と
+  乱数の折り返し演算が「意図的である」と宣言されていなかったこと
+  (units/CryptoPrimitives.pas と units/TestVectors.pas に $Q-/$R- の
+  局所宣言を入れて解消)。
+
+  ここが落ちたら「試験の指定が緩んだ」という意味である。
+  -------------------------------------------------------------------------- }
+procedure TestBuildFlags;
+begin
+  WriteLn;
+  WriteLn('--- 0. ビルド指定 (QLT-001) ---');
+  Check(BuildHasRangeChecks,
+    '**範囲検査つきでビルドされている** (配列外アクセスを見逃さない)');
+  Check(BuildHasOverflowChecks,
+    '**オーバーフロー検査つきでビルドされている** (整数の折り返しを見逃さない)');
+end;
+
 procedure TestLevenshtein;
 begin
   WriteLn;
@@ -142,6 +166,99 @@ begin
   r := MeasureErrorRate('AAAA', 'ACAA');
   CheckEqI(r.BitErrors, 1, '**A と C の違いは 1 bit** (文字単位より細かい)');
   CheckEqI(r.BitsCompared, 32, '4 文字ぶん 32 bit を比べている');
+end;
+
+{ 64 bit の定数を上下に分けて組み立てる。FPC は 2^63 以上の 16 進即値を
+  Int64 として読もうとして範囲外だと言うため。 }
+function U64(AHi, ALo: LongWord): QWord; inline;
+begin
+  Result := (QWord(AHi) shl 32) or QWord(ALo);
+end;
+
+{ --------------------------------------------------------------------------
+  3b. 既知解 — 生成される波形が版を越えて同じであること
+
+  ここが Golden WAV の「Golden」たるゆえん**そのもの**である。
+
+  試験 3 と 5 は「同じ種なら同じ結果」しか見ていない。それだけでは
+  **乱数の仕組みを取り替えても自己整合的なので通ってしまう**。取り替われば
+  生成される波形が全部変わり、README §32 に記録した CER の表は
+  意味を失うのに、試験は何も言わない。
+
+  そこで具体的な値を焼き付ける。ここが落ちたときは
+  「壊れた」のではなく **「Test vector の中身が変わった」** という意味で、
+  記録済みの数値を測り直す必要がある、と読む。
+  -------------------------------------------------------------------------- }
+procedure TestKnownAnswers;
+const
+  { seed=12345 のときの NextU64 の先頭 6 個。 }
+  ExpHi: array[0..5] of LongWord =
+    ($9857FB32, $C0CEBA4B, $1399CE5B, $BC6F73FB, $1E98E120, $35E76356);
+  ExpLo: array[0..5] of LongWord =
+    ($C9EFB5E4, $4A71BCE4, $8ADB52C4, $E045B705, $59E76B4F, $4AF1E2E3);
+  { seed=111 / 900 Hz の正弦 4000 標本に対する各分類の検査和。 }
+  SumHi: array[0..9] of LongWord =
+    ($638127EF, $1B366F58, $E0A45BD6, $A8D2318D, $105098A0,
+     $A288ADBE, $59ABD41F, $34809E1C, $70A4A1B7, $D24A871B);
+  SumLo: array[0..9] of LongWord =
+    ($6D21DB85, $FCA0DE0F, $F1D6DFFE, $3D7F305A, $A772D7BC,
+     $271C3574, $9742C9FC, $CFBB2409, $5EFEEC7D, $BD9617E3);
+var
+  r: TVectorRandom;
+  i, k, bad: Integer;
+  v, want: QWord;
+  sig, w: TDoubleArray;
+  spec: TVectorSpec;
+  g: Double;
+begin
+  WriteLn;
+  WriteLn('--- 3b. 既知解 (Test vector の中身が版を越えて同じか) ---');
+
+  r.Seed(12345);
+  bad := 0;
+  for i := 0 to 5 do
+  begin
+    v := r.NextU64;
+    want := U64(ExpHi[i], ExpLo[i]);
+    if v <> want then
+    begin
+      Inc(bad);
+      if bad <= 2 then
+        WriteLn(Format('        %d 個目: 期待 $%.16x / 実際 $%.16x',
+          [i, want, v]));
+    end;
+  end;
+  CheckEqI(bad, 0, '**乱数列が記録した値と一致する** (仕組みを取り替えていない)');
+
+  { 正規乱数も焼き付ける。NextU64 が同じでも Box-Muller の式を
+    変えれば波形は変わる。 }
+  r.Seed(777);
+  g := r.NextGauss;
+  Check(Abs(g - (-1.2365388342207544)) < 1E-12,
+    Format('正規乱数の先頭が記録した値と一致する (%.15f)', [g]));
+
+  { 10 分類すべての波形を検査和で縛る。 }
+  SetLength(sig, 4000);
+  for i := 0 to High(sig) do
+    sig[i] := 0.4 * Sin(2 * Pi * 900 * i / 8000);
+  bad := 0;
+  for k := Ord(vkClean) to Ord(vkSilence) do
+  begin
+    spec := MakeSpec(TVectorKind(k), 15);
+    spec.CarrierHz := 900;
+    w := ApplyImpairment(sig, Length(sig), spec, 8000, 111);
+    v := WaveChecksum(w, Length(w));
+    want := U64(SumHi[k], SumLo[k]);
+    if v <> want then
+    begin
+      Inc(bad);
+      WriteLn(Format('        %-18s 期待 $%.16x / 実際 $%.16x',
+        [VectorKindName(TVectorKind(k)), want, v]));
+    end;
+  end;
+  CheckEqI(bad, 0,
+    '**10 分類すべての波形が記録した検査和と一致する** ' +
+    '(README §32 の CER の表が依って立つ前提)');
 end;
 
 procedure TestRandomDeterminism;
@@ -681,9 +798,11 @@ begin
   GModes[2].Name := 'PSK31';  GModes[2].Make := @MakePsk31; GModes[2].Carrier := 1000;
   GModes[3].Name := 'PSK63';  GModes[3].Make := @MakePsk63; GModes[3].Carrier := 1000;
 
+  TestBuildFlags;
   TestLevenshtein;
   TestCerSemantics;
   TestRandomDeterminism;
+  TestKnownAnswers;
   TestSnrIsAchieved;
   TestImpairmentDeterminism;
   TestFrequencyShiftIsSingleSideband;
@@ -692,7 +811,11 @@ begin
   RunRegression;
 
   if FailCount = 0 then
+  begin
     CoverReq('MDM-001');
+    CoverReq('QLT-001');
+    CoverReq('QLT-002');
+  end;
 
   WriteLn;
   WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 (全 ', TestCount, ' 件中) ===');

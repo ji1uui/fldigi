@@ -60,12 +60,15 @@ const
 var
   GRnd: Cardinal = 12345;
 
+{$push}
+{$Q-}{$R-}   { 線形合同法は 2^32 で折り返すのが仕組みそのもの }
 function Rnd: Double;
 begin
   { 再現できる擬似乱数。試験が実行ごとに揺れないようにする。 }
   GRnd := GRnd * 1103515245 + 12345;
   Result := ((GRnd shr 16) and $7FFF) / 32768.0;
 end;
+{$pop}
 
 function NoiseSample: Double;
 begin

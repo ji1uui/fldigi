@@ -65,6 +65,7 @@ type
     function Final: TSha256Digest;
   end;
 
+
 function Sha256Buffer(const AData; ALen: PtrUInt): TSha256Digest;
 function Sha256String(const A: string): TSha256Digest;
 function Sha256Bytes(const A: TBytes): TSha256Digest;
@@ -120,6 +121,25 @@ const
     $90befffa, $a4506ceb, $bef9a3f7, $c67178f2);
 
   SHA256_BLOCK = 64;
+
+{ ============================================================================
+  ここから SHA-256 の中核。**演算の定義域の宣言**である。
+
+  SHA-256 は仕様として mod 2^32 の加算と、上位ビットを捨てる左シフトで
+  定義されている。折り返しは誤りではなく、アルゴリズムそのものである。
+
+  一方このプロジェクトは、アプリ側 (forms/DemoModemApp.lpi) で範囲検査と
+  オーバーフロー検査を有効にしている。宣言が無いと、この関数群は
+  **アプリのビルド設定では ERangeError で落ちる**。実際に落ちることを
+  確認したうえでこの宣言を入れた。
+
+  切っているのはこの範囲だけで、外へは波及しない ($push/$pop)。
+  「安全検査を切った」のではなく「ここは 32 bit で回る演算だ」と
+  書いてある、と読んでほしい。
+  ============================================================================ }
+{$push}
+{$Q-}  { オーバーフロー検査を切る: 加算が 2^32 で折り返すのが仕様 }
+{$R-}  { 範囲検査を切る: 左シフトで上位ビットが落ちるのが仕様 }
 
 function RotR(A: LongWord; N: Byte): LongWord; inline;
 begin
@@ -258,6 +278,8 @@ begin
     Result[i * 4 + 3] := Byte(FState[i] and $FF);
   end;
 end;
+
+{$pop}   { SHA-256 の中核ここまで。以降は通常の検査に戻す。 }
 
 function Sha256Buffer(const AData; ALen: PtrUInt): TSha256Digest;
 var
