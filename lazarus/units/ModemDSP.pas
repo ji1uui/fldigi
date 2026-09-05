@@ -77,6 +77,25 @@ function Sinc(AX: Double): Double;
   同じ述語を各所で書き直すと、いずれ食い違う。) }
 function IsPowerOfTwo(AN: Integer): Boolean;
 
+{ 順序統計 —— 外れ値に引きずられない代表値が要るときに使う。
+
+  雑音の床を測るのに平均は使えない。信号が数本混じっているだけで平均は
+  持ち上がるが、**中央値や下位のパーセンタイルは動かない**。信号は少数派だ
+  という性質をそのまま使う推定である。
+
+  ここに置いたのは、Waterfall の自動コントラストと Phase 3 の
+  Noise Estimator (SPC-002) が同じものを要るからである。leaf 側に書くと
+  二本になり、いずれ食い違う (X-05 で学んだ)。
+
+  いずれも **AValues を並べ替える** (quickselect)。呼ぶ側が要る順序を
+  持っているなら控えを渡すこと。確保はしない (X-04)。 }
+
+{ 小さいほうから AK 番目 (0 始まり) の値。 }
+function NthSmallest(var AValues: array of Double; ACount, AK: Integer): Double;
+{ AFraction は 0..1。0 が最小、0.5 が中央値、1 が最大 (nearest-rank)。 }
+function PercentileInPlace(var AValues: array of Double;
+  ACount: Integer; AFraction: Double): Double;
+
 type
   { DSP パラメータの誤りを表す例外 (FFT長が2の冪乗でない等)。 }
   EDspError = class(Exception);
@@ -447,6 +466,69 @@ function IsPowerOfTwo(AN: Integer): Boolean;
 begin
   Result := (AN >= 2) and ((AN and (AN - 1)) = 0);
 end;
+
+function NthSmallest(var AValues: array of Double; ACount, AK: Integer): Double;
+var
+  lo, hi, i, j, mid: Integer;
+  pivot, t: Double;
+begin
+  if (ACount <= 0) or (ACount > Length(AValues)) then
+    raise EDspError.CreateFmt(
+      '要素数が不正です (指定 %d / 配列 %d)', [ACount, Length(AValues)]);
+  if (AK < 0) or (AK >= ACount) then
+    raise EDspError.CreateFmt(
+      '順位が範囲外です (%d / 0..%d)', [AK, ACount - 1]);
+
+  { quickselect。全部並べ替える必要はないので、AK を含む側だけ潰していく。
+    平均 O(n)。ここは 1 行あたり列数ぶん回るので、O(n log n) の整列を
+    掛けるほどではない。 }
+  lo := 0;
+  hi := ACount - 1;
+  while lo < hi do
+  begin
+    { 中央の 3 つの中央値を軸にする。整列済みの入力で O(n^2) に落ちるのを
+      避けるため —— 雑音の床は「ほぼ整列している」ことがある。 }
+    mid := lo + (hi - lo) div 2;
+    if AValues[mid] < AValues[lo] then
+    begin t := AValues[mid]; AValues[mid] := AValues[lo]; AValues[lo] := t; end;
+    if AValues[hi] < AValues[lo] then
+    begin t := AValues[hi]; AValues[hi] := AValues[lo]; AValues[lo] := t; end;
+    if AValues[hi] < AValues[mid] then
+    begin t := AValues[hi]; AValues[hi] := AValues[mid]; AValues[mid] := t; end;
+    pivot := AValues[mid];
+
+    i := lo;
+    j := hi;
+    repeat
+      while AValues[i] < pivot do Inc(i);
+      while AValues[j] > pivot do Dec(j);
+      if i <= j then
+      begin
+        t := AValues[i]; AValues[i] := AValues[j]; AValues[j] := t;
+        Inc(i); Dec(j);
+      end;
+    until i > j;
+
+    if AK <= j then hi := j
+    else if AK >= i then lo := i
+    else Break;   { 軸そのものが AK 番目 }
+  end;
+  Result := AValues[AK];
+end;
+
+function PercentileInPlace(var AValues: array of Double;
+  ACount: Integer; AFraction: Double): Double;
+var
+  k: Integer;
+begin
+  if ACount <= 0 then
+    raise EDspError.Create('要素がありません。');
+  { nearest-rank。補間しないのは、順序統計をそのまま返すほうが
+    「実際に観測した値」であって解釈しやすいためである。 }
+  k := Round(ClampF(AFraction, 0, 1) * (ACount - 1));
+  Result := NthSmallest(AValues, ACount, k);
+end;
+
 
 procedure BitReverseInPlace(var ABuf: TComplexArray);
 var

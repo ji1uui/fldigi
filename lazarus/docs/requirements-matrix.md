@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 58 件 (検証済 41 / 実装済 1 / 方針決定 3 / 起案 5 / 後送り 8)
+要求 60 件 (検証済 42 / 実装済 1 / 方針決定 3 / 起案 6 / 後送り 8)
 
 ## Phase 0
 
@@ -65,6 +65,8 @@ Verification / Status。Primary Foundation は 1 つに限る。
 
 | REQ-ID | 要求 | Exp | Obj | Pri | Sec | Ext | Prio | Verification | Status | 検証 | 出典 | ADR |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
+| GUI-001 | スペクトルの履歴を表示用の段階値に変換し列と周波数を対応づける | Discover | D | X | Z | No | Must | test_waterfall (細い信号の保存・利得変化への追従・拡大時の対応・流し直しでの履歴破棄・取りこぼしの申告) | 検証済 | ✓ | §12 Phase 2 |  |
+| GUI-002 | Waterfallを画面に描画し操作できるようにする | Discover | D | X | - | No | Must | LCL 環境での描画結合試験と目視確認 | 起案 |  | §12 Phase 2 |  |
 | MDM-003 | BPSK (PSK31/63/125) の送受信が成立する | Communicate | A | Y | Z | No | Must | test_psk (往復・雑音耐性・全印字文字) | 検証済 | ✓ | Baseline Phase 2 Practical Compatible Core |  |
 | MDM-004 | PSK復調が軟判定の尺度をEvidenceに載せる | Communicate | D | Y | Z | No | Should | test_psk (本文と雑音の余裕が分離することを実測) | 検証済 | ✓ | ADR-002 / §7 Phase 4 の Confidence の材料 | ADR-002 |
 | MDM-005 | PSK31 VaricodeがfldigiのTableと一致する | Communicate | A | Z | - | No | Must | test_psk_varicode (往復・符号の形・長さ分布・一意性) | 検証済 | ✓ | fldigi src/psk/pskvaricode.cxx |  |

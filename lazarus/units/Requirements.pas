@@ -600,6 +600,26 @@ begin
   R('RTTY-021', 'QSB時に複数復調戦略を比較', expCommunicate, objPerformance,
     fndIntelligentReceiver, [fndModernComputing, fndEngineeringQuality],
     False, priMust, 3, 'Golden WAV BER/CER', rsProposed, '§18', 'ADR-002', True);
+  { --- Phase 2 Basic Waterfall ---
+    Baseline は Phase 2 の機能一覧に「Basic Waterfall」と挙げるだけで、
+    §18 の表には要求を持っていない (表に載っているのは Phase 4 の GUI-014
+    だけ)。滝は「絵が出ること」ではなく「信号を見つけられること」なので、
+    そこを要求として書き起こした。
+
+    表示の論理 (GUI-001) と描画 (GUI-002) を分けてある。論理は LCL に
+    依存しないので無画面で試験でき、描画は LCL 環境が要る。
+    分けずに一つの要求にすると、試験できる半分だけを見て「検証済」と
+    書いてしまう —— RT-008 の「等」と同じ失敗になる。 }
+  R('GUI-001', 'スペクトルの履歴を表示用の段階値に変換し列と周波数を対応づける',
+    expDiscover, objNewExperience, fndModernComputing,
+    [fndEngineeringQuality], False, priMust, 2,
+    'test_waterfall (細い信号の保存・利得変化への追従・拡大時の対応・' +
+    '流し直しでの履歴破棄・取りこぼしの申告)', rsVerified, '§12 Phase 2', '');
+  R('GUI-002', 'Waterfallを画面に描画し操作できるようにする',
+    expDiscover, objNewExperience, fndModernComputing, [],
+    False, priMust, 2, 'LCL 環境での描画結合試験と目視確認', rsProposed,
+    '§12 Phase 2', '');
+
   R('GUI-014', '低Confidence文字を視覚表示', expCommunicate, objNewExperience,
     fndIntelligentReceiver, [fndEngineeringQuality],
     False, priMust, 4, 'UI検証・ユーザーテスト', rsProposed, '§18', '', True);
