@@ -684,10 +684,16 @@ begin
     expCommunicate, objRobustness, fndModernComputing,
     [fndEngineeringQuality], False, priMust, 1,
     'test_audioring (2スレッド通し番号照合)', rsVerified, '§4 X-01, §5.1', '');
+  { test_replay が流しているのは **CW だけ** である。RTTY と PSK は
+    あとから足したのに、この試験には足されなかった (RT-001/RT-002 と同じ形)。
+    「Replay Decode を可能とする」という文面は全モデムを覆うので、
+    検証方法に **どのモデムで見たか** を書く。3 モデムぶんの決定性と
+    完全リセットは test_portfolio (MDM-008) が見ている。 }
   R('RT-005', 'Audio History Bufferを保持しReplay Decodeを可能とする',
     expExperiment, objNewExperience, fndModernComputing,
     [fndIntelligentReceiver], False, priMust, 1,
-    'test_audioring (並行書込下の整合性) / test_replay (流し直しの再現性)', rsVerified, '§4 X-06', '');
+    'test_audioring (並行書込下の整合性) / test_replay (CWで流し直しの再現性) / ' +
+    'test_portfolio (全モデムの決定性と完全リセット)', rsVerified, '§4 X-06', '');
   R('RT-006', 'CPU core数を正しく検出しWorker数の根拠にする',
     expCommunicate, objPerformance, fndModernComputing, [],
     False, priMust, 1, 'test_audioring (TThread比較)', rsVerified,
@@ -903,6 +909,20 @@ begin
     rsDeferred,
     'Baseline Phase 3 Adaptive Receiver の AFC。実測: 60Hz ドリフトで ' +
     'PSK31/63 は本文CER 0.79/0.86、CW と RTTY(AFC) は 0.00', '');
+
+  { Baseline §12 の Phase 2 完了条件
+      「Phase 2 Decoder は Phase 3 の Normal 戦略として再利用可能であること」
+    は、機能一覧ではなく **フェーズの門** である。にもかかわらず §18 に
+    要求が無く、試験も無かった。Waterfall や Olivia/MFSK と同じ抜けだが、
+    こちらは門なので先に閉じる ―― ADR-002 が「復調器を増やしてから型を
+    変えると全モデムの書き換えになる」と言っているのと同じ理由で、
+    復調器が 3 つのうちに契約を固める。 }
+  R('MDM-008', 'Phase 2の復調器をPhase 3の戦略として再利用できる',
+    expCommunicate, objRobustness, fndIntelligentReceiver,
+    [fndEngineeringQuality], False, priMust, 2,
+    'test_portfolio (決定性・Restartでの完全リセット・区画不変性・' +
+    '同じ音への並行適用・出所の名乗り・確定区画の位置)', rsVerified,
+    '§12 Phase 2 完了条件', 'ADR-002');
 
   R('MDM-001', '劣悪条件のTest vectorsで回帰試験を行う',
     expCommunicate, objRobustness, fndEngineeringQuality,

@@ -373,6 +373,7 @@ end;
 procedure TCwModem.Restart;
 begin
   // fldigi: cw::restart() は空実装。ここでは同期パラメータの再計算のみ行う。
+  RestoreCommandedFreq;
   SyncParameters;
   RxInit;
 end;
@@ -831,9 +832,6 @@ var
   FiltOut: TComplexArray;
   Value: Double;
 begin
-  { Replay / 再現のために通算サンプル位置を進める (X-06)。
-    基底クラスが持つ。Replay は流す前に StreamPosition を入れる。 }
-  AdvanceStreamPos(ALen);
   // fldigi: reset_rx_filter() (CWmfilt="整合フィルタ"モードは未実装のため、
   // Bandwidth プロパティの変更のみを検出条件とする)
   if Bandwidth <> FFiltBandwidth then
@@ -891,6 +889,13 @@ begin
       DecodeStream(Value);
     end;
   end;
+  { --- 通算サンプル位置を進めるのは **最後** ---
+    先に進めると、この区画の中で確定した結果がすべて「区画の末尾」を
+    名乗ることになる。末尾はその文字を生んだ音より後ろなので、そこから
+    流し直しても同じ文字は出ない ―― Replay Decode にも障害再現にも使えない。
+    最後に進めれば、区画の処理中 FStreamPos は **その区画の先頭** を指す。
+    詳しくは DecodeEvidence.SamplePos の説明。 }
+  AdvanceStreamPos(ALen);
   Result := 0;
 end;
 

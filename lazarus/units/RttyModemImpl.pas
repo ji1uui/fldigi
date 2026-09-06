@@ -362,7 +362,9 @@ end;
 
 procedure TRttyModem.Restart;
 begin
-  // fldigi: rtty::restart()
+  // fldigi: rtty::restart() は set_freq(progdefaults.RTTYsweetspot) で
+  // 設定上の周波数へ戻す。ここでは指令された周波数へ戻す。
+  RestoreCommandedFreq;
   ApplyBaudSettings;
   FShiftState := RTTY_LETTERS;
   FRxMode := RTTY_LETTERS;
@@ -733,7 +735,8 @@ begin
     FFreqErr := DecayAvg(FFreqErr, Ferr / 8, AfcSpeedDiv);
 
     if FAfcOn then
-      SetFreq(Frequency - FFreqErr);
+      { AFC は自動追尾。指令された周波数は書き換えない (Restart で戻せる)。 }
+      TrackFreq(Frequency - FFreqErr);
   end;
 end;
 
@@ -747,9 +750,6 @@ var
   MarkOut, SpaceOut: TComplexArray;
 begin
   ComputeMetric;
-  { Replay / 再現のために通算サンプル位置を進める (X-06)。
-    基底クラスが持つ。Replay は流す前に StreamPosition を入れる。 }
-  AdvanceStreamPos(ALen);
 
   for i := 0 to ALen - 1 do
   begin
@@ -764,6 +764,13 @@ begin
     for j := 0 to nOut - 1 do
       ProcessFilteredSample(MarkOut[j], SpaceOut[j]);
   end;
+  { --- 通算サンプル位置を進めるのは **最後** ---
+    先に進めると、この区画の中で確定した結果がすべて「区画の末尾」を
+    名乗ることになる。末尾はその文字を生んだ音より後ろなので、そこから
+    流し直しても同じ文字は出ない ―― Replay Decode にも障害再現にも使えない。
+    最後に進めれば、区画の処理中 FStreamPos は **その区画の先頭** を指す。
+    詳しくは DecodeEvidence.SamplePos の説明。 }
+  AdvanceStreamPos(ALen);
   Result := 0;
 end;
 

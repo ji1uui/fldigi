@@ -150,12 +150,28 @@ type
       RxInit では **リセットしない**。位置は音声側の座標であって
       復調器の内部状態ではないので、復調器を初期化しても意味は変わらない。 }
     FStreamPos: Int64;
+    FCommandedFreq: Double;   // 使う側が指令した周波数 (自動追尾で動かさない)
   protected
     { 必要量を満たすまで伸ばす (縮めない)。 }
     procedure EnsureTxBuf(ANeeded: Integer);
 
     { RxProcess の先頭で呼び、入力位置を進める。 }
     procedure AdvanceStreamPos(ACount: Integer); inline;
+
+    { --- 指令された周波数と、自動追尾で動いた周波数を分ける ---
+      SetFreq は「使う側がここに合わせた」という指令で、その値を憶えておく。
+      AFC のような自動追尾は TrackFreq を使い、指令値を書き換えない。
+
+      分けないと、AFC が動いたあとに流し直したとき前の音に引っ張られた
+      周波数から始まってしまい、**同じ音から同じ結果が出ない**。
+      Phase 3 は同じ音に複数の戦略を当てて比べるので、これが崩れると
+      差が戦略の差なのか前回の残りなのか分からなくなる。
+
+      fldigi も同じ分担で、rtty::rx_init() は周波数に触れず、
+      restart() が set_freq(progdefaults.RTTYsweetspot) で指令値へ戻す。 }
+    procedure TrackFreq(AFreq: Double);
+    { 指令された周波数へ戻す。各モデムの Restart から呼ぶ。 }
+    procedure RestoreCommandedFreq;
 
     { 派生クラスから復調結果を上位へ渡す唯一の経路。
       fldigi: put_rx_char(c) に相当するが、運ぶのは文字ではなく Evidence。 }
@@ -328,6 +344,24 @@ begin
   Inc(FStreamPos, ACount);
 end;
 
+procedure TCustomModem.TrackFreq(AFreq: Double);
+var
+  saved: Double;
+begin
+  { 自動追尾。周波数は動かすが、指令値は憶えたままにする。 }
+  saved := FCommandedFreq;
+  SetFreq(AFreq);
+  FCommandedFreq := saved;
+end;
+
+procedure TCustomModem.RestoreCommandedFreq;
+begin
+  { 指令された周波数へ戻す。まだ一度も指令されていなければ何もしない
+    (0 に落とすと、既定の周波数で動いていたモデムを壊す)。 }
+  if FCommandedFreq > 0 then
+    SetFreq(FCommandedFreq);
+end;
+
 procedure TCustomModem.Init;
 begin
   // fldigi: modem::init() は stopflag = false; と wf 反転状態の再計算のみ。
@@ -356,6 +390,9 @@ end;
 
 procedure TCustomModem.SetFreq(AFreq: Double);
 begin
+  { 使う側の指令。憶えておき、Restart で戻せるようにする。 }
+  FCommandedFreq := AFreq;
+  if FCommandedFreq < 0 then FCommandedFreq := 0;
   // fldigi: modem::set_freq() は progdefaults の上下限にクランプするが、
   // ここでは可搬性のため単純な下限0のみ担保し、上限判定は
   // 呼び出し側 (TModemUI/アプリ設定) に委ねる。

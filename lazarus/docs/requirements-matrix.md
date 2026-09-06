@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 60 件 (検証済 42 / 実装済 1 / 方針決定 3 / 起案 6 / 後送り 8)
+要求 61 件 (検証済 43 / 実装済 1 / 方針決定 3 / 起案 6 / 後送り 8)
 
 ## Phase 0
 
@@ -54,7 +54,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | REQ-ID | 要求 | Exp | Obj | Pri | Sec | Ext | Prio | Verification | Status | 検証 | 出典 | ADR |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | RT-004 | 取り込みと復調をRing Bufferで分離する | Communicate | B | X | Z | No | Must | test_audioring (2スレッド通し番号照合) | 検証済 | ✓ | §4 X-01, §5.1 |  |
-| RT-005 | Audio History Bufferを保持しReplay Decodeを可能とする | Experiment | D | X | Y | No | Must | test_audioring (並行書込下の整合性) / test_replay (流し直しの再現性) | 検証済 | ✓ | §4 X-06 |  |
+| RT-005 | Audio History Bufferを保持しReplay Decodeを可能とする | Experiment | D | X | Y | No | Must | test_audioring (並行書込下の整合性) / test_replay (CWで流し直しの再現性) / test_portfolio (全モデムの決定性と完全リセット) | 検証済 | ✓ | §4 X-06 |  |
 | RT-006 | CPU core数を正しく検出しWorker数の根拠にする | Communicate | C | X | - | No | Must | test_audioring (TThread比較) | 検証済 | ✓ | §4 X-03, X-07 | ADR-009 |
 | RT-007 | Audio I/O専用経路をDSP重処理から分離する | Communicate | B | X | Z | No | Must | test_capture (実時間デバイスで欠落を実測) | 検証済 | ✓ | §4 X-01 |  |
 | RT-008 | FFTの係数表を共有サービス化し資源の重複を無くす | Communicate | C | X | Z | No | Should | test_fftshared (直接DFTとの照合・並行使用) | 検証済 | ✓ | §4 X-05 |  |
@@ -73,6 +73,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | QLT-001 | 試験をアプリと同じ検査設定 (範囲/オーバーフロー) で実行する | Communicate | B | Z | - | No | Must | test_regression ({$IFOPT} でビルド指定そのものを検査) | 検証済 | ✓ | §14 Z-02。アプリ側 .lpi は有効、試験は無効という食い違いがあった |  |
 | QLT-003 | 試験が解放漏れを起こさない | Communicate | B | Z | - | No | Must | run_tests.sh が heaptrc を常時有効にし、スイートごとの許容数と照合して超えたら失敗させる (試験バイナリからは申告できないため rsImplemented) | 実装済 |  | §14 Z-02。try..finally の欠落はこの言語で最も事故が多い形である |  |
 | QLT-002 | Test vectorsの波形が版を越えて同一である | Experiment | B | Z | - | No | Must | test_regression (乱数列と10分類の検査和を既知解で固定) | 検証済 | ✓ | §14.1 Golden WAV。同一性を謳いながら固定していなかった |  |
+| MDM-008 | Phase 2の復調器をPhase 3の戦略として再利用できる | Communicate | B | Y | Z | No | Must | test_portfolio (決定性・Restartでの完全リセット・区画不変性・同じ音への並行適用・出所の名乗り・確定区画の位置) | 検証済 | ✓ | §12 Phase 2 完了条件 | ADR-002 |
 | MDM-001 | 劣悪条件のTest vectorsで回帰試験を行う | Communicate | B | Z | Y | No | Must | test_regression (4モード×10条件×8種の乱数でCER/BER) | 検証済 | ✓ | §14 Z-02, §14.1, §16, §17 |  |
 
 ## Phase 3

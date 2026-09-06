@@ -316,6 +316,7 @@ end;
 
 procedure TPskModem.Restart;
 begin
+  RestoreCommandedFreq;
   RxInit;
   TxInit;
 end;
@@ -459,8 +460,6 @@ var
   z, z1, z2: TComplex;
   delta, sum, ampSum: Double;
 begin
-  { Replay / 再現のために通算サンプル位置を進める (X-06)。 }
-  AdvanceStreamPos(ALen);
 
   delta := 2 * Pi * Frequency / SampleRate;
 
@@ -516,6 +515,13 @@ begin
     end;
   end;
 
+  { --- 通算サンプル位置を進めるのは **最後** ---
+    先に進めると、この区画の中で確定した結果がすべて「区画の末尾」を
+    名乗ることになる。末尾はその文字を生んだ音より後ろなので、そこから
+    流し直しても同じ文字は出ない ―― Replay Decode にも障害再現にも使えない。
+    最後に進めれば、区画の処理中 FStreamPos は **その区画の先頭** を指す。
+    詳しくは DecodeEvidence.SamplePos の説明。 }
+  AdvanceStreamPos(ALen);
   Result := 0;
 end;
 

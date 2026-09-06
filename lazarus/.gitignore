@@ -36,6 +36,7 @@ test/test_psk_varicode
 test/test_psk
 test/test_spectrum
 test/test_waterfall
+test/test_portfolio
 test/test_regression
 test/coverage/
 forms/DemoModemApp
