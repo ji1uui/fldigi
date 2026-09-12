@@ -77,6 +77,28 @@ function Sinc(AX: Double): Double;
   同じ述語を各所で書き直すと、いずれ食い違う。) }
 function IsPowerOfTwo(AN: Integer): Boolean;
 
+{ Gray 符号 —— 隣り合う値が 1 bit しか違わない並べ方。
+
+  MFSK 系はトーン番号をこれで並べ替えてから送る。雑音で隣のトーンと
+  取り違えても、**ビットの誤りが 1 本で済む**からである。素の 2 進で
+  並べると 7 と 8 が 4 bit 違い、一つ取り違えただけで 4 bit 倒れる。
+
+  MFSK も Olivia (pj_gray.h) も同じものを使うので共有側に置いた。
+
+  **fldigi の名前は慣習と逆である。** src/misc/misc.cxx を見ると
+
+      grayencode()  = 畳み込み (x ^ x>>1 ^ x>>2 ^ ...)  <- 慣習では復号
+      graydecode()  = x ^ (x >> 1)                      <- 慣習では符号化
+
+  で、原典にも別名がコメントで併記してあり、作者も気づいている。
+  ここでは **やっていることで名付ける** (慣習どおり)。fldigi の呼び出しを
+  読むときは名前ではなく式を見ること。 }
+
+{ 2 進 -> Gray。隣り合う値が 1 bit しか違わなくなる。 }
+function GrayEncode(AValue: LongWord): LongWord;
+{ Gray -> 2 進。GrayEncode の逆。 }
+function GrayDecode(AValue: LongWord): LongWord;
+
 { 順序統計 —— 外れ値に引きずられない代表値が要るときに使う。
 
   雑音の床を測るのに平均は使えない。信号が数本混じっているだけで平均は
@@ -465,6 +487,26 @@ end;
 function IsPowerOfTwo(AN: Integer): Boolean;
 begin
   Result := (AN >= 2) and ((AN and (AN - 1)) = 0);
+end;
+
+function GrayEncode(AValue: LongWord): LongWord;
+begin
+  Result := AValue xor (AValue shr 1);
+end;
+
+function GrayDecode(AValue: LongWord): LongWord;
+var
+  v: LongWord;
+begin
+  { 上の桁から順に畳み込む。32 bit ぶんを 5 回で畳める。
+    fldigi は 8 bit を 7 回ずらして畳んでいるが、結果は同じである。 }
+  v := AValue;
+  v := v xor (v shr 16);
+  v := v xor (v shr 8);
+  v := v xor (v shr 4);
+  v := v xor (v shr 2);
+  v := v xor (v shr 1);
+  Result := v;
 end;
 
 function NthSmallest(var AValues: array of Double; ACount, AK: Integer): Double;

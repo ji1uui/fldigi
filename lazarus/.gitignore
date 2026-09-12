@@ -38,6 +38,7 @@ test/test_spectrum
 test/test_waterfall
 test/test_portfolio
 test/test_fec
+test/test_mfsk_varicode
 test/test_regression
 test/coverage/
 forms/DemoModemApp

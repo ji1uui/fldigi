@@ -936,13 +936,36 @@ begin
     どちらが原因か切り分けられない。
     **この要求にはまだ実行時の利用者が居ない。** MFSK モデムが載るまでは
     「部品として正しい」ことだけを主張しており、モードとしての成立は
-    MDM-010 (未起案) で別に見る。 }
+    別の要求 (MDM-011) で見る。
+    (前はここで未採番の ID を先取りして書いていた。あとから別のものに
+    その番号を使うことになり食い違ったので、**採番済みの ID しか書かない**
+    ことにした。) }
   R('MDM-009', 'MFSK系の誤り訂正層(畳み込み符号とインタリーバ)が仕様どおり動く',
     expCommunicate, objRobustness, fndIntelligentReceiver,
     [fndEngineeringQuality], False, priMust, 2,
     'test_fec (多項式から手で出した既知解・軟判定が硬判定より強いこと・' +
     'インタリーバの往復遅れと固まった誤りの分散)', rsVerified,
     '§12 Phase 2 MFSK, §17 BER', '');
+
+  { MFSK の「文字とビットの層」。符号の層 (MDM-009) と対になる。
+    Varicode は fldigi が同じ内容を 2 つの形 (ビット文字列と数値) で
+    持っているので、片方を写して **もう一方を期待値に** した。
+    Gray 符号は MFSK と Olivia の双方が使うので ModemDSP に置いた。 }
+  R('MDM-010', 'MFSKのVaricodeとGray符号がfldigiの表と一致する',
+    expCommunicate, objCompatibility, fndIntelligentReceiver,
+    [fndEngineeringQuality], False, priMust, 2,
+    'test_mfsk_varicode (上流のもう一方の表と256件照合・符号の一意切り出し' +
+    '条件・連ねたビット列からの切り出し・Grayの隣接1bit性)', rsVerified,
+    '§12 Phase 2 MFSK', '');
+
+  { MFSK をモードとして成立させる要求。音の層 (トーン検出とシンボル同期) が
+    まだ無いので起案のままにしてある。部品 (MDM-009 / MDM-010) が揃った
+    ことを「MFSK ができた」と書かないための枠である。 }
+  R('MDM-011', 'MFSK16の送受信が成立する',
+    expCommunicate, objCompatibility, fndIntelligentReceiver,
+    [fndModernComputing], False, priMust, 2,
+    'test_regression への MFSK16 追加 (10分類のTest vectorsでCER)', rsProposed,
+    '§12 Phase 2 MFSK', '');
 
   R('MDM-008', 'Phase 2の復調器をPhase 3の戦略として再利用できる',
     expCommunicate, objRobustness, fndIntelligentReceiver,
