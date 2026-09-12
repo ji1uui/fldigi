@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 65 件 (検証済 46 / 実装済 1 / 方針決定 3 / 起案 7 / 後送り 8)
+要求 66 件 (検証済 47 / 実装済 1 / 方針決定 3 / 起案 7 / 後送り 8)
 
 ## Phase 0
 
@@ -76,6 +76,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | QLT-002 | Test vectorsの波形が版を越えて同一である | Experiment | B | Z | - | No | Must | test_regression (乱数列と10分類の検査和を既知解で固定) | 検証済 | ✓ | §14.1 Golden WAV。同一性を謳いながら固定していなかった |  |
 | MDM-009 | MFSK系の誤り訂正層(畳み込み符号とインタリーバ)が仕様どおり動く | Communicate | B | Y | Z | No | Must | test_fec (多項式から手で出した既知解・軟判定が硬判定より強いこと・インタリーバの往復遅れと固まった誤りの分散) | 検証済 | ✓ | §12 Phase 2 MFSK, §17 BER |  |
 | MDM-010 | MFSKのVaricodeとGray符号がfldigiの表と一致する | Communicate | A | Y | Z | No | Must | test_mfsk_varicode (上流のもう一方の表と256件照合・符号の一意切り出し条件・連ねたビット列からの切り出し・Grayの隣接1bit性) | 検証済 | ✓ | §12 Phase 2 MFSK |  |
+| MDM-012 | MFSKのトーン検出と軟判定が仕様どおり動く | Communicate | B | Y | X | No | Must | test_mfsk_tones (滑るDFTと直接DFTの照合・16トーンの検出と軟判定・隣接トーン取り違えが1bit・別周波数への同調・雑音耐性の実測) | 検証済 | ✓ | §12 Phase 2 MFSK, §17 最低実用SNR |  |
 | MDM-011 | MFSK16の送受信が成立する | Communicate | A | Y | X | No | Must | test_regression への MFSK16 追加 (10分類のTest vectorsでCER) | 起案 |  | §12 Phase 2 MFSK |  |
 | MDM-008 | Phase 2の復調器をPhase 3の戦略として再利用できる | Communicate | B | Y | Z | No | Must | test_portfolio (決定性・Restartでの完全リセット・区画不変性・同じ音への並行適用・出所の名乗り・確定区画の位置) | 検証済 | ✓ | §12 Phase 2 完了条件 | ADR-002 |
 | MDM-001 | 劣悪条件のTest vectorsで回帰試験を行う | Communicate | B | Z | Y | No | Must | test_regression (4モード×10条件×8種の乱数でCER/BER) | 検証済 | ✓ | §14 Z-02, §14.1, §16, §17 |  |

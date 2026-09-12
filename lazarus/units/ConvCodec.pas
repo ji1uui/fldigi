@@ -105,6 +105,8 @@ type
     FTraceback: Integer;
     FChunkSize: Integer;
     function Traceback(out AMetric: Integer): Integer;
+    procedure SetTracebackLen(AValue: Integer);
+    procedure SetChunkSize(AValue: Integer);
   public
     constructor Create(AK: Integer = CONV_MFSK_K;
       APoly1: Integer = CONV_MFSK_POLY1; APoly2: Integer = CONV_MFSK_POLY2);
@@ -116,8 +118,17 @@ type
     function Decode(ASym0, ASym1: Byte; out AMetric: Integer): Integer;
     property K: Integer read FK;
     property StateCount: Integer read FNStates;
-    property TracebackLen: Integer read FTraceback;
-    property ChunkSize: Integer read FChunkSize;
+
+    { --- 遡る長さと、一度に確定するビット数 ---
+      既定は fldigi の viterbi::init() と同じ (K*12 と 8) だが、モードによって
+      変える。MFSK は mfsk.cxx の TRACEPAIR(45, 352) と setchunksize(1) で
+      **遡り 45・1 ビットずつ**にしている。復調器が 1 ビット単位で
+      Varicode のシフトレジスタへ入れる作りだからである。
+
+      遡りを短くすると応答は速くなるが訂正力が落ちる。長くすると逆になる。
+      モードごとの取り合いなので、ここは設定にしてある。 }
+    property TracebackLen: Integer read FTraceback write SetTracebackLen;
+    property ChunkSize: Integer read FChunkSize write SetChunkSize;
   end;
 
 { 立っているビットの数が奇数なら 1。生成多項式との畳み込みに使う。 }
@@ -240,6 +251,27 @@ begin
   for i := 0 to High(FHistory) do FHistory[i] := 0;
   for i := 0 to CONV_PATHMEM - 1 do FSequence[i] := 0;
   FPtr := 0;
+end;
+
+procedure TViterbiDecoder.SetTracebackLen(AValue: Integer);
+begin
+  { 道の記憶より長くは遡れない。確定させる分も要るので余裕を見る。 }
+  if (AValue < FK) or (AValue > CONV_PATHMEM - 16) then
+    raise EConvCodecError.CreateFmt(
+      '遡る長さは %d..%d です (指定 %d)', [FK, CONV_PATHMEM - 16, AValue]);
+  FTraceback := AValue;
+  Reset;
+end;
+
+procedure TViterbiDecoder.SetChunkSize(AValue: Integer);
+begin
+  { PATHMEM を割り切れないと、ptr が一周したときに確定の位置がずれる。 }
+  if (AValue < 1) or (AValue > 8) or ((CONV_PATHMEM mod AValue) <> 0) then
+    raise EConvCodecError.CreateFmt(
+      '一度に確定するビット数は 1..8 かつ %d の約数です (指定 %d)',
+      [CONV_PATHMEM, AValue]);
+  FChunkSize := AValue;
+  Reset;
 end;
 
 function TViterbiDecoder.Traceback(out AMetric: Integer): Integer;

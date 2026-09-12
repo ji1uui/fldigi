@@ -958,8 +958,20 @@ begin
     '条件・連ねたビット列からの切り出し・Grayの隣接1bit性)', rsVerified,
     '§12 Phase 2 MFSK', '');
 
-  { MFSK をモードとして成立させる要求。音の層 (トーン検出とシンボル同期) が
-    まだ無いので起案のままにしてある。部品 (MDM-009 / MDM-010) が揃った
+  { MFSK の「音の層」のうち、トーンを測って軟判定に落とすところ。
+    **シンボル同期の追尾と AFC は含まない** ―― いまは SymLen ごとに
+    区切るだけで、送受のサンプルが揃っていることを前提にしている。
+    文面をここまでに絞ってあるのは、追尾まで含んだ書き方にすると
+    試験していない部分を覆ってしまうからである (§36 §37 の轍)。 }
+  R('MDM-012', 'MFSKのトーン検出と軟判定が仕様どおり動く',
+    expCommunicate, objRobustness, fndIntelligentReceiver,
+    [fndModernComputing], False, priMust, 2,
+    'test_mfsk_tones (滑るDFTと直接DFTの照合・16トーンの検出と軟判定・' +
+    '隣接トーン取り違えが1bit・別周波数への同調・雑音耐性の実測)', rsVerified,
+    '§12 Phase 2 MFSK, §17 最低実用SNR', '');
+
+  { MFSK をモードとして成立させる要求。シンボル同期の追尾がまだ無いので
+    起案のままにしてある。部品 (MDM-009 / MDM-010 / MDM-012) が揃った
     ことを「MFSK ができた」と書かないための枠である。 }
   R('MDM-011', 'MFSK16の送受信が成立する',
     expCommunicate, objCompatibility, fndIntelligentReceiver,

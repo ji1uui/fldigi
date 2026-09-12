@@ -94,6 +94,16 @@ function IsPowerOfTwo(AN: Integer): Boolean;
   ここでは **やっていることで名付ける** (慣習どおり)。fldigi の呼び出しを
   読むときは名前ではなく式を見ること。 }
 
+{ 複素ミキサ —— 信号を AFreqHz だけ下へずらす。
+
+  位相は呼ぶ側が持つ。サンプルごとに進めるので、区画をまたいでも連続する。
+
+  **CW と RTTY は同じものをそれぞれ自前で持っている。** 三本目を書き足す
+  のはやめてここに置いたが、既存の 2 つはまだ移していない (無関係な変更を
+  混ぜないため)。移すのは別の作業。 }
+function ComplexMix(var APhase: Double; AFreqHz, ASampleRate: Double;
+  const AIn: TComplex): TComplex;
+
 { 2 進 -> Gray。隣り合う値が 1 bit しか違わなくなる。 }
 function GrayEncode(AValue: LongWord): LongWord;
 { Gray -> 2 進。GrayEncode の逆。 }
@@ -212,6 +222,59 @@ procedure ComplexFFT(var ABuf: TComplexArray);
   その場の逆変換。呼び出し側でスケーリングする必要が無いよう、
   結果を要素数Nで除算した状態 (1/N規約) を返す。 }
 procedure InverseComplexFFT(var ABuf: TComplexArray);
+
+const
+  { 滑る DFT の減衰。1 にすると丸め誤差が溜まり続ける (fldigi の K1)。 }
+  SDFT_DAMPING = 0.99999999999;
+
+{ ============================================================================
+  滑る DFT (Sliding DFT) —— 1 サンプルごとに窓をずらして数本の bin だけ見る
+
+  MFSK 系はシンボルごとに「どのトーンが鳴っているか」を知りたい。
+  必要なのは全 bin ではなく **トーンの本数ぶん** (MFSK16 なら 16 本) だけで、
+  しかも 1 サンプルずつ窓をずらして見たい (シンボル境界を探すため)。
+
+  そこで毎サンプル FFT を回すのではなく、漸化式で更新する。
+
+      X[k] <- (X[k] + x[n] - r^N x[n-N]) * r * exp(j 2pi k / N)
+
+  1 サンプルあたり bin 数ぶんの複素乗算で済む。N 点 FFT を毎サンプル
+  回すより桁違いに軽い ―― MFSK16 は 512 点・16 bin なので、
+  FFT なら 512*9 蝶、こちらは 16 回の乗算である。
+
+  r をちょうど 1 にしないのは数値のためである。1 だと丸め誤差が減衰せずに
+  溜まり続け、長時間走らせると値が壊れる。fldigi は K1 = 0.99999999999 と
+  している (src/filters/filters.h の sfft)。ごくわずかに減衰させることで、
+  古い誤差が指数的に消える。
+
+  共有側に置いたのは、MFSK16/32/64 が同じものを使い、ほかのトーン系モードも
+  同じ形になるからである (X-05)。
+  ============================================================================ }
+type
+  TSlidingDft = class
+  private
+    FLen: Integer;
+    FFirstBin: Integer;
+    FBinCount: Integer;
+    FVrot: TComplexArray;     // bin ごとの回転子 (減衰込み)
+    FBins: TComplexArray;     // bin ごとの現在値
+    FDelay: TComplexArray;    // 窓から出ていく分を覚えておく輪
+    FPtr: Integer;
+    FDecay: Double;           // r^N。窓から出す分に掛ける
+  public
+    { ALen 点の DFT のうち、AFirstBin から ABinCount 本だけを追う。 }
+    constructor Create(ALen, AFirstBin, ABinCount: Integer);
+    procedure Reset;
+    { 1 サンプル入れて、ABins に現在の bin を得る (ABinCount 個以上必要)。
+      確保しない (X-04)。 }
+    procedure Run(const AInput: TComplex; var ABins: TComplexArray);
+    property Len: Integer read FLen;
+    property FirstBin: Integer read FFirstBin;
+    property BinCount: Integer read FBinCount;
+    { bin の中心周波数 [Hz]。 }
+    function BinFrequency(AIndex: Integer; ASampleRate: Double): Double;
+  end;
+
 
 type
   { TMovingAverage
@@ -487,6 +550,93 @@ end;
 function IsPowerOfTwo(AN: Integer): Boolean;
 begin
   Result := (AN >= 2) and ((AN and (AN - 1)) = 0);
+end;
+
+constructor TSlidingDft.Create(ALen, AFirstBin, ABinCount: Integer);
+var
+  i: Integer;
+  phi, tau: Double;
+begin
+  inherited Create;
+  if ALen < 4 then
+    raise EDspError.CreateFmt('窓長は 4 以上です (指定 %d)', [ALen]);
+  if (AFirstBin < 0) or (ABinCount < 1) or (AFirstBin + ABinCount > ALen) then
+    raise EDspError.CreateFmt(
+      'bin の範囲が窓に収まりません (%d から %d 本 / 窓 %d)',
+      [AFirstBin, ABinCount, ALen]);
+  FLen := ALen;
+  FFirstBin := AFirstBin;
+  FBinCount := ABinCount;
+
+  SetLength(FVrot, FBinCount);
+  SetLength(FBins, FBinCount);
+  SetLength(FDelay, FLen);
+
+  { 回転子。減衰 K1 を掛け込んでおくと、Run の中で掛け算が増えない。 }
+  tau := 2 * Pi / FLen;
+  FDecay := 1.0;
+  for i := 0 to FBinCount - 1 do
+  begin
+    phi := tau * (FFirstBin + i);
+    FVrot[i] := CplxMake(SDFT_DAMPING * Cos(phi), SDFT_DAMPING * Sin(phi));
+  end;
+  { r^N。窓から出ていくサンプルに掛ける。 }
+  for i := 1 to FLen do
+    FDecay := FDecay * SDFT_DAMPING;
+
+  Reset;
+end;
+
+procedure TSlidingDft.Reset;
+var
+  i: Integer;
+begin
+  for i := 0 to FBinCount - 1 do FBins[i] := CplxMake(0, 0);
+  for i := 0 to FLen - 1 do FDelay[i] := CplxMake(0, 0);
+  FPtr := 0;
+end;
+
+procedure TSlidingDft.Run(const AInput: TComplex; var ABins: TComplexArray);
+var
+  i: Integer;
+  z, de: TComplex;
+begin
+  if Length(ABins) < FBinCount then
+    raise EDspError.CreateFmt(
+      '受け皿が足りません (要求 %d / 受け皿 %d)', [FBinCount, Length(ABins)]);
+
+  { 窓に入る分から、窓から出る分を引く。出る分は N サンプルぶん減衰している。 }
+  de := FDelay[FPtr];
+  z := CplxMake(AInput.Re - FDecay * de.Re, AInput.Im - FDecay * de.Im);
+  FDelay[FPtr] := AInput;
+  FPtr := FPtr + 1;
+  if FPtr >= FLen then FPtr := 0;
+
+  for i := 0 to FBinCount - 1 do
+  begin
+    { X[k] <- (X[k] + z) * vrot[k]。回転子に減衰が入っている。 }
+    FBins[i] := CplxMake(
+      (FBins[i].Re + z.Re) * FVrot[i].Re - (FBins[i].Im + z.Im) * FVrot[i].Im,
+      (FBins[i].Re + z.Re) * FVrot[i].Im + (FBins[i].Im + z.Im) * FVrot[i].Re);
+    ABins[i] := FBins[i];
+  end;
+end;
+
+function TSlidingDft.BinFrequency(AIndex: Integer; ASampleRate: Double): Double;
+begin
+  Result := ASampleRate * (FFirstBin + AIndex) / FLen;
+end;
+
+function ComplexMix(var APhase: Double; AFreqHz, ASampleRate: Double;
+  const AIn: TComplex): TComplex;
+begin
+  Result := CplxMake(
+    AIn.Re * Cos(APhase) - AIn.Im * Sin(APhase),
+    AIn.Re * Sin(APhase) + AIn.Im * Cos(APhase));
+  APhase := APhase - 2 * Pi * AFreqHz / ASampleRate;
+  { 位相は巻き戻す。放っておくと Cos/Sin の引数が育って精度が落ちる。 }
+  while APhase < -2 * Pi do APhase := APhase + 2 * Pi;
+  while APhase > 2 * Pi do APhase := APhase - 2 * Pi;
 end;
 
 function GrayEncode(AValue: LongWord): LongWord;
