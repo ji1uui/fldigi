@@ -31,6 +31,7 @@ uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   Classes, SysUtils, Math,
   SoundIntf, ModemTypes, Modem, ModemDSP, DecodeEvidence,
+  SpectrumService, WaterfallModel,
   RttyModemImpl, CwModemImpl, PskModemImpl, TestSupport, Requirements;
 
 const
@@ -504,6 +505,147 @@ begin
   end;
 end;
 
+{ --------------------------------------------------------------------------
+  受信経路 **全体** の deadline 余裕
+
+  RT-002 は「**全モデム**の受信ブロック」を測っている。ところが受信経路には
+  モデムのほかに共有サービスが居る。
+
+      音声 --> モデム (復調)
+           +-> SpectrumService (FFT 8192)  --> WaterfallModel (表示の格子)
+
+  Spectrum と Waterfall はモデムではないので RT-002 の文面に入らず、
+  あとから足したのにどの deadline 試験にも入っていなかった。
+  復調が間に合っていても、滝を出した瞬間に間に合わなくなれば同じことである。
+
+  Spectrum は hop 2048 なので **4 ブロックに 1 回だけ** 8192 点 FFT を回す。
+  平均は小さく、その 1 ブロックだけ跳ねる。だから平均ではなく
+  **p99 と最悪**で見る必要がある。
+  -------------------------------------------------------------------------- }
+procedure MeasureChain(const AName: string; AModems: Integer;
+  AWithSpectrum: Boolean; out ASt: TBlockTiming);
+const
+  BLK = 512;
+  SR = 8000;
+  WARMUP = 200;
+  SAMPLES = 2000;
+var
+  buf: array[0..BLK - 1] of Double;
+  ms: TDoubleArray;
+  snd: TCaptureSoundDevice;
+  rx: array[0..2] of TRttyModem;
+  sp: TSpectrumService;
+  wf: TWaterfallModel;
+  i, k, n: Integer;
+  t0: Double;
+  expected: Int64;
+begin
+  ms := nil;
+  SetLength(ms, SAMPLES);
+  for i := 0 to BLK - 1 do
+    buf[i] := 0.3 * Sin(2 * Pi * 1000 * i / SR) + 0.05 * Sin(i * 0.7);
+
+  snd := TCaptureSoundDevice.Create;
+  sp := nil; wf := nil;
+  for i := 0 to 2 do rx[i] := nil;
+  try
+    for i := 0 to AModems - 1 do
+    begin
+      rx[i] := TRttyModem.Create(snd);
+      rx[i].Frequency := 1000;
+      rx[i].AfcOn := True;
+      rx[i].RxInit;
+    end;
+    if AWithSpectrum then
+    begin
+      sp := TSpectrumService.Create;          { 既定 8192 / hop 2048 }
+      wf := TWaterfallModel.Create(sp);       { 既定 800 列 x 256 行 }
+    end;
+
+    for k := 1 to WARMUP do
+    begin
+      for i := 0 to AModems - 1 do rx[i].RxProcess(buf, BLK);
+      if AWithSpectrum then begin sp.Feed(buf, BLK); wf.Pump; end;
+    end;
+
+    for k := 0 to SAMPLES - 1 do
+    begin
+      t0 := HiResSeconds;
+      for i := 0 to AModems - 1 do rx[i].RxProcess(buf, BLK);
+      if AWithSpectrum then begin sp.Feed(buf, BLK); wf.Pump; end;
+      ms[k] := (HiResSeconds - t0) * 1000;
+    end;
+
+    ASt := SummarizeBlockTiming(ms, 1000.0 * BLK / SR);
+    n := 0;
+    if AWithSpectrum then n := Integer(sp.FramesProduced);
+    WriteLn('  ', AName);
+    WriteLn('    ', ASt.Describe);
+    if AWithSpectrum then
+    begin
+      WriteLn(Format('    (%d ブロックで枠 %d ―― FFT 8192 は 4 ブロックに 1 回)',
+        [SAMPLES, n]));
+      { --- 時間ではなく **仕事の量** を縛る ---
+        壁時計の判定は緩く取らざるを得ない (機械の負荷で落ちては困る) ので、
+        数割の劣化は捕まえられない。一方 FFT を何回回したかは決定的なので、
+        「更新を速くしよう」として hop を詰めるといった変更は**厳密に**捕まる。
+        時間の判定は桁違いの劣化に対する保険、こちらが日常の網である。 }
+      { 期待値は **設計の定数から** 立てる。sp.Hop から計算してはいけない ――
+        hop を詰める改竄をすると期待値も一緒に動いてしまい、**決して落ちない
+        主張**になる (実際そう書いて反証をすり抜けさせた)。
+        縛りたいのは「既定は FFT 長の 1/4 = 4 区画に 1 回」という設計そのもの。 }
+      Check(sp.FftSize = SPECTRUM_DEFAULT_FFT,
+        '既定の FFT 長が変わっていない');
+      Check(sp.Hop = SPECTRUM_DEFAULT_FFT div 4, Format(
+        '**既定の送り幅は FFT 長の 1/4** (%d 区画に 1 回 / 実際 hop %d)',
+        [(SPECTRUM_DEFAULT_FFT div 4) div BLK, sp.Hop]));
+      expected := ((Int64(WARMUP + SAMPLES) * BLK - SPECTRUM_DEFAULT_FFT)
+                   div (SPECTRUM_DEFAULT_FFT div 4)) + 1;
+      Check(sp.FramesProduced = expected, Format(
+        '**FFT の回数が仕様どおり** (%d 区画で %d 枠 / 実際 %d)',
+        [WARMUP + SAMPLES, expected, sp.FramesProduced]));
+    end;
+  finally
+    wf.Free; sp.Free;
+    for i := 0 to 2 do rx[i].Free;
+    snd.Free;
+  end;
+end;
+
+procedure TestReceiveChainDeadline;
+var
+  st, stPortfolio: TBlockTiming;
+begin
+  WriteLn;
+  WriteLn('--- 受信経路全体 (モデム + Spectrum + Waterfall) の deadline 余裕 ---');
+  MeasureChain('RTTY + Spectrum(8192) + Waterfall(800x256)', 1, True, st);
+  Check(st.MeanRatio < MAX_MEAN_RATIO, Format(
+    '**経路全体の平均が deadline の %.0f%% 未満** (実際 %.2f%%)',
+    [100 * MAX_MEAN_RATIO, 100 * st.MeanRatio]));
+  Check(st.P99Ratio < MAX_P99_RATIO, Format(
+    '**経路全体の p99 が deadline の %.0f%% 未満** (FFT が跳ねる分を含む / 実際 %.2f%%)',
+    [100 * MAX_P99_RATIO, 100 * st.P99Ratio]));
+  Check(st.MaxRatio < MAX_PEAK_RATIO, Format(
+    '経路全体の最悪でも deadline の %.0f%% 未満 (実際 %.2f%%)',
+    [100 * MAX_PEAK_RATIO, 100 * st.MaxRatio]));
+
+  { Phase 3 の Algorithm Portfolio は同じ音に複数の戦略を当てる。
+    何本まで載るかはそのときの設計判断だが、**桁が合っているか**を
+    いま測っておく。ここは合否ではなく記録が目的なので、判定は
+    「絶対に落とさない側」の最悪値だけに掛ける。 }
+  WriteLn;
+  WriteLn('  [Phase 3 の見積り] 戦略を 3 本並べたとき');
+  MeasureChain('RTTY x3 + Spectrum + Waterfall', 3, True, stPortfolio);
+  Check(stPortfolio.MaxRatio < MAX_PEAK_RATIO, Format(
+    '戦略 3 本でも最悪が deadline の %.0f%% 未満 (実際 %.2f%%)',
+    [100 * MAX_PEAK_RATIO, 100 * stPortfolio.MaxRatio]));
+  WriteLn(Format('    -> 1 本あたりおよそ %.2f%% / 残り %.1f%% が Phase 3 の取り分',
+    [100 * (stPortfolio.MeanRatio - st.MeanRatio) / 2,
+     100 * (1.0 - stPortfolio.MeanRatio)]));
+  WriteLn('    ※ 実測は Xeon 2.80GHz。Baseline の基準機 Intel N150 では');
+  WriteLn('      おおむねこれより重くなる。N150 実機での確認は未実施。');
+end;
+
 begin
   WriteLn('=== X-04 / Z-04 realtime 特性の検証 ===');
   InstallCountingMM;
@@ -522,6 +664,7 @@ begin
   { 時間の測定は、計数用メモリマネージャを外してから行う
     (計数のオーバーヘッドが測定値に乗らないようにするため)。 }
   TestRxDeadlineMargin;
+  TestReceiveChainDeadline;
 
   WriteLn;
   WriteLn('=== テスト完了: ', FailCount, ' 件の失敗 (全 ', TestCount, ' 件中) ===');
@@ -531,6 +674,7 @@ begin
   begin
     CoverReq('RT-001');
     CoverReq('RT-002');
+    CoverReq('RT-009');
   end;
 
   if FailCount > 0 then

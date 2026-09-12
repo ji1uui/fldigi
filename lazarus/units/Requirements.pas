@@ -689,6 +689,19 @@ begin
     「Replay Decode を可能とする」という文面は全モデムを覆うので、
     検証方法に **どのモデムで見たか** を書く。3 モデムぶんの決定性と
     完全リセットは test_portfolio (MDM-008) が見ている。 }
+  { RT-002 は「**全モデム**の受信ブロック」を測っている。ところが受信経路には
+    モデムのほかに共有サービス (Spectrum / Waterfall) が居り、これらは
+    モデムではないので RT-002 の文面に入らない。あとから足したのに
+    どの deadline 試験にも入っていなかった ―― 「全モデムの」という語が
+    覆っていなかった側である。復調が間に合っても滝で溢れれば同じことなので、
+    **経路全体**を測る要求を別に立てた。 }
+  R('RT-009', 'Waterfallを含む受信経路全体がdeadlineを守る',
+    expCommunicate, objPerformance, fndModernComputing,
+    [fndEngineeringQuality], False, priMust, 2,
+    'test_realtime (モデム + Spectrum(8192) + Waterfall を 1 区画ぶん通して実測。' +
+    'FFT は 4 区画に 1 回跳ねるので p99 と最悪で判定)', rsVerified,
+    '§14 Z-04, §17 CPU/Latency', '');
+
   R('RT-005', 'Audio History Bufferを保持しReplay Decodeを可能とする',
     expExperiment, objNewExperience, fndModernComputing,
     [fndIntelligentReceiver], False, priMust, 1,
@@ -917,6 +930,20 @@ begin
     こちらは門なので先に閉じる ―― ADR-002 が「復調器を増やしてから型を
     変えると全モデムの書き換えになる」と言っているのと同じ理由で、
     復調器が 3 つのうちに契約を固める。 }
+  { MFSK 系 (MFSK16/32/64、Olivia/Contestia) は音の前段に誤り訂正を置く。
+    符号の層はモードの復調そのものとは独立に既知解で確かめられるので、
+    復調器より先に固めた ―― 復調を書きながら同時に符号も疑うことになると、
+    どちらが原因か切り分けられない。
+    **この要求にはまだ実行時の利用者が居ない。** MFSK モデムが載るまでは
+    「部品として正しい」ことだけを主張しており、モードとしての成立は
+    MDM-010 (未起案) で別に見る。 }
+  R('MDM-009', 'MFSK系の誤り訂正層(畳み込み符号とインタリーバ)が仕様どおり動く',
+    expCommunicate, objRobustness, fndIntelligentReceiver,
+    [fndEngineeringQuality], False, priMust, 2,
+    'test_fec (多項式から手で出した既知解・軟判定が硬判定より強いこと・' +
+    'インタリーバの往復遅れと固まった誤りの分散)', rsVerified,
+    '§12 Phase 2 MFSK, §17 BER', '');
+
   R('MDM-008', 'Phase 2の復調器をPhase 3の戦略として再利用できる',
     expCommunicate, objRobustness, fndIntelligentReceiver,
     [fndEngineeringQuality], False, priMust, 2,
