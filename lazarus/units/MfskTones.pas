@@ -44,10 +44,45 @@
   硬判定で選んだトーンだけ 2 倍に重み付けするのは fldigi と同じで、
   「一番大きかった」という判断にも一票入れる意味がある。
 
+  シンボル同期の追尾
+  ----------------------------------------------------------------------------
+  送信側と受信側でサンプルの切れ目が揃っている保証はない。受信を始めた
+  時刻は任意だし、送受の発振器がわずかに違えば時間とともにずれていく。
+  SymLen ごとに機械的に区切るだけでは、ずれた瞬間から崩れる。
+
+  そこで**一つ前のシンボルのトーンが、いつ最も強かったか**を見る。
+  滑る DFT の窓は直近 SymLen サンプルを覆う。窓がちょうど一つ前の
+  シンボルに重なったとき、そのトーンの大きさは最大になる。区切りが
+  正しければ、その瞬間は「いま」から SymLen サンプル前にある。
+
+      d = 何サンプル前か (0 = いま)
+      ずれ = (一つ前のトーンが最大だった d) - SymLen
+
+  ずれが正なら山が思ったより古い ―― こちらの区切りが遅い ―― ので次の
+  シンボルを縮める。負なら延ばす。いきなり全量直さず NumTones で割り、
+  さらに 8 点の移動平均にかけてから効かせる。雑音で山の位置が一つ二つ
+  動いても振り回されないためである。
+
+  三つの門を置いてある。どれも「山が一つに決まらない」場合を弾く。
+
+  - 一つ前と今が同じトーンなら見送る。境目で大きさが落ちず山が平らになる。
+  - 二つ前と一つ前が同じトーンでも同じ理由で見送る。
+  - 切り出しが 3 回に満たない間は見送る。一つ前・二つ前が本物の判定に
+    なっていない。このとき窓も必ず満ちるので、門はこれ一つで足りる。
+
+  ずれの残り
+  ----------------------------------------------------------------------------
+  比例だけの輪なので、送受のサンプル速度が違うと**ずれが残る**。
+  1 シンボルあたり s サンプルずれ続けるなら、落ち着いた先の SyncError は
+
+      SyncError = s x NumTones
+
+  になる (補正 SyncError/NumTones がちょうど s と釣り合う)。逆に読めば
+  SyncError から送受の時計の差が分かる ―― Phase 3 の観測点に使える。
+  MFSK16 で 3000 ppm なら s = 1.536、SyncError は 24.6 付近。実測 24.375。
+
   実装していないもの
   ----------------------------------------------------------------------------
-  - **シンボル同期の追尾**。いまは SymLen ごとに区切るだけである。
-    送受でサンプルが揃っていれば動くが、ずれると崩れる。次段で入れる。
   - **AFC**。周波数のずれは追わない。
   - **CWI 回避** (定常搬送波が 1 トーンに居座る場合の穴あけ)。
     Phase 3 の QRM 対策で扱う。
@@ -70,6 +105,10 @@ const
   { 1 シンボルが運べるビット数の上限。MFSK 系は 3..5 だが、
     作業用配列の大きさを決めるために上限を置いてある。 }
   MFSK_MAX_SYMBITS = 8;
+
+  { 山の位置をならす移動平均の長さ。fldigi: Cmovavg(8)。
+    短いと雑音に振り回され、長いと本当のずれに追いつくのが遅くなる。 }
+  MFSK_SYNC_AVG_LEN = 8;
 
 type
   EMfskError = class(Exception);
@@ -124,7 +163,21 @@ type
     FCounter: Integer;
     FSymbol: Integer;
     FTotalSymbols: Int64;
+
+    { --- シンボル同期の追尾 --- }
+    FPipe: array of Double;     // [2*SymLen][NumTones] のトーンの大きさの二乗
+    FPipeLen: Integer;          // = 2*SymLen
+    FPipePtr: Integer;          // いまのサンプルを書いた位置
+    FSyncAvg: TMovingAverage;   // 山の位置をならす (fldigi: Cmovavg(8))
+    FSyncTracking: Boolean;
+    FPrev1Symbol: Integer;
+    FPrev2Symbol: Integer;
+    FSyncError: Double;         // ならした山の位置 - SymLen [サンプル]
+    FSyncAdjust: Integer;       // 直近に効かせた補正 [サンプル]
+    FSyncUpdates: Int64;
     procedure DecideSymbol;
+    procedure StorePipe;
+    procedure Synchronize;
   public
     constructor Create(const AMode: TMfskMode; ACentreHz: Double = 0);
     destructor Destroy; override;
@@ -148,6 +201,23 @@ type
     property Mode: TMfskMode read FMode;
     { これまでに切り出したシンボル数。 }
     function TotalSymbols: Int64;
+
+    { --- シンボル同期の追尾 ---
+
+      切るか入れるかを外から選べるようにしてあるのは二つ理由がある。
+      一つは、音の層だけを試したいとき (MDM-012) に区切りを固定したいこと。
+      もう一つは、この追尾が効いていることを**切って落ちることで**
+      確かめられるようにすること。既定は入り。 }
+    property SyncTracking: Boolean read FSyncTracking write FSyncTracking;
+
+    { いま見えているずれ [サンプル]。正なら「こちらの区切りが遅い」。
+      ならしたあとの値で、補正に使ったものそのものである。
+      Z-01 の観測点として外へ出せる。 }
+    property SyncError: Double read FSyncError;
+    { 直近のシンボルで実際に足し引きしたサンプル数。門で見送った回は 0。 }
+    property SyncAdjust: Integer read FSyncAdjust;
+    { 追尾が効いた回数。門で見送った回は数えない。 }
+    function SyncUpdates: Int64;
   end;
 
 { シンボル値をトーン番号へ (送信側)。
@@ -229,11 +299,20 @@ begin
   SetLength(FBins, FMode.NumTones);
   SetLength(FMag, FMode.NumTones);
   SetLength(FSoft, FMode.SymBits);
+
+  { 山を探す窓は「直近 2 シンボル」。一つ前のシンボルが窓のどこにでも
+    入るようにするには、これだけ要る。 }
+  FPipeLen := 2 * FMode.SymLen;
+  SetLength(FPipe, FPipeLen * FMode.NumTones);
+  FSyncAvg := TMovingAverage.Create(MFSK_SYNC_AVG_LEN);
+  FSyncTracking := True;
+
   Reset;
 end;
 
 destructor TMfskToneDetector.Destroy;
 begin
+  FSyncAvg.Free;
   FDft.Free;
   inherited Destroy;
 end;
@@ -249,6 +328,15 @@ begin
   FTotalSymbols := 0;
   for i := 0 to FMode.NumTones - 1 do FMag[i] := 0;
   for i := 0 to FMode.SymBits - 1 do FSoft[i] := 128;
+
+  for i := 0 to High(FPipe) do FPipe[i] := 0;
+  FPipePtr := 0;
+  FSyncAvg.Reset;
+  FPrev1Symbol := 0;
+  FPrev2Symbol := 0;
+  FSyncError := 0;
+  FSyncAdjust := 0;
+  FSyncUpdates := 0;
 end;
 
 procedure TMfskToneDetector.DecideSymbol;
@@ -308,6 +396,71 @@ begin
   Inc(FTotalSymbols);
 end;
 
+procedure TMfskToneDetector.StorePipe;
+var
+  tone, base: Integer;
+begin
+  { 大きさそのものではなく**二乗**を積む。山を探すだけなので平方根は
+    要らず、順序は変わらない。1 サンプルあたり NumTones 回の
+    平方根が丸ごと消える。 }
+  base := FPipePtr * FMode.NumTones;
+  for tone := 0 to FMode.NumTones - 1 do
+    FPipe[base + tone] :=
+      FBins[tone].Re * FBins[tone].Re + FBins[tone].Im * FBins[tone].Im;
+end;
+
+procedure TMfskToneDetector.Synchronize;
+var
+  d, idx, peak: Integer;
+  val, best, smoothed: Double;
+begin
+  FSyncAdjust := 0;
+
+  { --- 門 --- }
+  { 一つ前と二つ前が本物になるまで待つ。3 回目の切り出しからである。
+    ついでに窓も満ちる ―― 3 回切り出したなら少なくとも 3*SymLen
+    サンプル入っており、窓は 2*SymLen なので必ず埋まっている。
+    「本物の判定が二つ揃っている」と「窓が満ちている」は同じことなので、
+    門は一つでよい。 }
+  if FTotalSymbols < 3 then Exit;
+  { 隣り合うシンボルが同じトーンだと、境目で大きさが落ちない。
+    山が平らになり、位置が決まらない。 }
+  if FSymbol = FPrev1Symbol then Exit;
+  if FPrev1Symbol = FPrev2Symbol then Exit;
+
+  { --- 一つ前のシンボルのトーンが、何サンプル前に最も強かったか ---
+    初期値を SymLen (= ずれ 0) にしてあるのは、窓のどこも 0 だったときに
+    何もしないためである。上流はここで -1 のまま移動平均へ渡すので、
+    真の無音では区切りを毎回縮めることになる。
+    上の門があるかぎり無音でここまで来ないはずだが、来たときに
+    害の無いほうを初期値にしておく。 }
+  best := 0;
+  peak := FMode.SymLen;
+  idx := FPipePtr;
+  for d := 0 to FPipeLen - 1 do
+  begin
+    val := FPipe[idx * FMode.NumTones + FPrev1Symbol];
+    if val > best then
+    begin
+      best := val;
+      peak := d;
+    end;
+    Dec(idx);
+    if idx < 0 then idx := FPipeLen - 1;
+  end;
+
+  { --- ならしてから効かせる --- }
+  smoothed := FSyncAvg.Run(peak);
+  FSyncError := smoothed - FMode.SymLen;
+
+  { NumTones で割るのは利得を下げるためで、fldigi と同じ。
+    Floor(x + 0.5) は四捨五入。|補正| <= SymLen/NumTones + 1 なので、
+    NumTones >= 2 である限り FCounter が 0 以下になることはない。 }
+  FSyncAdjust := Floor(-FSyncError / FMode.NumTones + 0.5);
+  FCounter := FCounter + FSyncAdjust;
+  Inc(FSyncUpdates);
+end;
+
 function TMfskToneDetector.Feed(ASample: Double): Boolean;
 var
   z: TComplex;
@@ -318,6 +471,7 @@ begin
   { 最低トーンが bin BaseTone に来るように下へずらす。 }
   z := ComplexMix(FPhase, FMixHz - FMode.CentreFreqHz, FMode.SampleRate, z);
   FDft.Run(z, FBins);
+  StorePipe;
 
   Dec(FCounter);
   Result := FCounter <= 0;
@@ -325,7 +479,22 @@ begin
   begin
     FCounter := FMode.SymLen;
     DecideSymbol;
+    if FSyncTracking then
+      Synchronize
+    else
+      FSyncAdjust := 0;
+    FPrev2Symbol := FPrev1Symbol;
+    FPrev1Symbol := FSymbol;
   end;
+
+  { 次のサンプルの置き場所へ。 }
+  Inc(FPipePtr);
+  if FPipePtr >= FPipeLen then FPipePtr := 0;
+end;
+
+function TMfskToneDetector.SyncUpdates: Int64;
+begin
+  Result := FSyncUpdates;
 end;
 
 function TMfskToneDetector.SoftBit(AIndex: Integer): Byte;

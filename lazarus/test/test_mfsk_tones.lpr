@@ -13,6 +13,10 @@
   6. 雑音に対する強さを数字で残す
   7. 取り込みで確保しない (X-04) / 同じ音から同じ結果 (Z-05)
 
+  **シンボル同期の追尾はここでは切ってある。** ここは「区切りが合って
+  いる前提でトーンをどれだけ正しく測れるか」だけを見る。追尾は
+  test_mfsk_sync (MDM-013) が見る。
+
   3 と 4 が核心である。5 は Gray を挟む理由そのもので、音の層で効くことを
   ここで確かめる (表の上では test_mfsk_varicode が確かめている)。
 
@@ -95,6 +99,12 @@ var
 begin
   det := TMfskToneDetector.Create(AMode, ACentreHz);
   try
+    { **追尾は切る。** ここで見ているのは音の層だけ (MDM-012) で、
+      区切りは SymLen ごとに固定してある前提の数字である。追尾を
+      入れたままにすると、切り出し数が 1 つ増減して期待値が揺れるし、
+      雑音耐性の実測も「トーン検出の強さ」ではなくなる。
+      追尾そのものは test_mfsk_sync (MDM-013) が見ている。 }
+    det.SyncTracking := False;
     SetLength(Result, 0);
     SetLength(ASoft, 0);
     n := 0;
@@ -509,6 +519,7 @@ begin
   wave := Modulate(m, syms, 0.05, 99);
 
   det := TMfskToneDetector.Create(m);
+  det.SyncTracking := False;
   try
     for i := 0 to 2 * m.SymLen - 1 do det.Feed(wave[i]);   { 初回を済ませる }
 
