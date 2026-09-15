@@ -997,7 +997,9 @@ begin
   R('MDM-011', 'MFSK16の送受信が成立する',
     expCommunicate, objCompatibility, fndIntelligentReceiver,
     [fndModernComputing], False, priMust, 2,
-    'test_regression への MFSK16 追加 (10分類のTest vectorsでCER)', rsProposed,
+    'test_mfsk_modem (往復・区画不変性・確定位置・Restartでの完全リセット・' +
+    '開始位置のずれと時計差・雑音での文字誤り率・送信帯域) と ' +
+    'test_regression (10分類のTest vectorsでCER)', rsVerified,
     '§12 Phase 2 MFSK', '');
 
   R('MDM-008', 'Phase 2の復調器をPhase 3の戦略として再利用できる',

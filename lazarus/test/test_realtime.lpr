@@ -32,7 +32,8 @@ uses
   Classes, SysUtils, Math,
   SoundIntf, ModemTypes, Modem, ModemDSP, DecodeEvidence,
   SpectrumService, WaterfallModel,
-  RttyModemImpl, CwModemImpl, PskModemImpl, TestSupport, Requirements;
+  RttyModemImpl, CwModemImpl, PskModemImpl, MfskModemImpl, MfskTones,
+  TestSupport, Requirements;
 
 const
   { --- deadline に対する判定しきい値 (v1.1 Z-04) ---
@@ -476,6 +477,7 @@ var
   rx: TRttyModem;
   cw: TCwModem;
   psk: TPskModem;
+  mfsk: TMfskModem;
 begin
   snd := TCaptureSoundDevice.Create;
   rx := TRttyModem.Create(snd);
@@ -501,6 +503,17 @@ begin
     MeasureRxDeadline('PSK31', psk, 1000);
   finally
     psk.Free;
+  end;
+
+  { RT-002 は「**全モデム**の受信ブロック」である。モードを足したら
+    ここにも足す ―― 足し忘れると、要求の文面だけが広くて中身が
+    追いついていない状態になる (README 40 章の轍)。 }
+  mfsk := TMfskModem.Create(snd, mmMFSK16);
+  try
+    mfsk.Frequency := MFSK16_MODE.CentreFreqHz;
+    MeasureRxDeadline('MFSK16', mfsk, MFSK16_MODE.CentreFreqHz);
+  finally
+    mfsk.Free;
     snd.Free;
   end;
 end;

@@ -50,7 +50,7 @@ uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   Classes, SysUtils, Math, DateUtils,
   SoundIntf, ModemTypes, Modem, ModemDSP,
-  CwModemImpl, RttyModemImpl, PskModemImpl, DecodeEvidence,
+  CwModemImpl, RttyModemImpl, PskModemImpl, MfskModemImpl, MfskTones, DecodeEvidence,
   TestVectors, ErrorRate, WaveFile, TestSupport, Requirements;
 
 var
@@ -776,6 +776,14 @@ begin
   Result.Frequency := 1000;
 end;
 
+function MakeMfsk16(ASound: TCustomSoundDevice): TCustomModem;
+begin
+  Result := TMfskModem.Create(ASound, mmMFSK16);
+  { MFSK は「中心周波数」を指す約束である。1000 Hz を最低トーンに置く
+    諸元なので、中心はそこから帯域の半分だけ上になる。 }
+  Result.Frequency := MFSK16_MODE.CentreFreqHz;
+end;
+
 const
   REF_MSG = 'CQ DE JA1ABC K';
   TRIALS = 8;
@@ -794,7 +802,7 @@ type
   end;
 
 var
-  GModes: array[0..3] of TModeSpec;
+  GModes: array[0..4] of TModeSpec;
 
 { 無音のときに出してよい文字数の上限。実測 (CW 0.0 / RTTY 14.3 /
   PSK31 31.0 / PSK63 39.1) のおよそ 2 倍。
@@ -809,7 +817,9 @@ begin
     0: Result := 5;     { CW20   実測 0.0 }
     1: Result := 35;    { RTTY45 実測 14.3 }
     2: Result := 70;    { PSK31  実測 31.0 }
-  else Result := 90;    { PSK63  実測 39.1 }
+    3: Result := 90;    { PSK63  実測 39.1 }
+  else Result := 80;    { MFSK16 実測 35.3。誤り訂正が雑音からも文字を
+                          組み立てるので、CW/RTTY より多く喋る。 }
   end;
 end;
 
@@ -824,7 +834,9 @@ begin
     vkExtremeQsb:
       if AModeIdx = 0 then Result := 0.35;   { CW は深いフェージングで落ちる }
     vkFrequencyDrift:
-      { PSK は AFC を持たないので 60 Hz のドリフトに追従できない。
+      { PSK と MFSK は AFC を持たないので 60 Hz のドリフトに追従できない。
+        MFSK16 はトーン間隔が 15.625 Hz しかないので、60 Hz は
+        トーン 4 本ぶんに当たる ―― 同期は追えても周波数は追えない。
         既知の限界として扱う (MDM-006 / Phase 3)。 }
       if AModeIdx >= 2 then Result := -1;
   end;
@@ -975,6 +987,8 @@ begin
   GModes[1].Name := 'RTTY45'; GModes[1].Make := @MakeRtty;  GModes[1].Carrier := 1000;
   GModes[2].Name := 'PSK31';  GModes[2].Make := @MakePsk31; GModes[2].Carrier := 1000;
   GModes[3].Name := 'PSK63';  GModes[3].Make := @MakePsk63; GModes[3].Carrier := 1000;
+  GModes[4].Name := 'MFSK16'; GModes[4].Make := @MakeMfsk16;
+  GModes[4].Carrier := MFSK16_MODE.CentreFreqHz;
 
   TestBuildFlags;
   TestLevenshtein;

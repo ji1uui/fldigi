@@ -75,6 +75,13 @@ type
       ASyms は Size 個ちょうどを渡すこと。 }
     procedure Process(var ASyms: array of Byte);
 
+    { 送信側のための入り口。1 シンボルぶんのビットを詰めた整数を通す。
+      最上位が第 1 ビットである (受信側の軟判定の並びと同じ向き)。
+      fldigi: void interleave::bits(unsigned int *)
+      中身は Process と同じで、ビットを 0/1 のバイトに開いて通すだけ。
+      送受で別の表を使ってしまう事故を防ぐために、ここに置いてある。 }
+    procedure ProcessBits(var ABits: LongWord);
+
     { かき混ぜ -> 戻し を通り抜けるのに要る区画数 (1 区画 = Size シンボル)。
 
       行ごとの遅れは向きによって違う ―― それが「散らす」ということである。
@@ -160,6 +167,23 @@ begin
       else
         ASyms[i] := FTable[Cell(k, i, i)];
   end;
+end;
+
+procedure TInterleaver.ProcessBits(var ABits: LongWord);
+var
+  syms: array[0..7] of Byte;   { Size は 2..8 なので固定長で足りる }
+  i: Integer;
+  v: LongWord;
+begin
+  for i := 0 to FSize - 1 do
+    syms[i] := (ABits shr (FSize - i - 1)) and 1;
+
+  Process(syms);
+
+  v := 0;
+  for i := 0 to FSize - 1 do
+    v := (v shl 1) or (syms[i] and 1);
+  ABits := v;
 end;
 
 function TInterleaver.RoundTripDelayBlocks: Integer;

@@ -34,7 +34,7 @@ uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   SysUtils, Math,
   SoundIntf, ModemTypes, Modem, ModemEngine, DecodeEvidence, ErrorRate,
-  CwModemImpl, RttyModemImpl, PskModemImpl, TestSupport, Requirements;
+  CwModemImpl, RttyModemImpl, PskModemImpl, MfskModemImpl, MfskTones, TestSupport, Requirements;
 
 var
   FailCount: Integer = 0;
@@ -187,6 +187,12 @@ begin
   Result.Frequency := 1000;
 end;
 
+function MakeMfsk(ASound: TCustomSoundDevice): TCustomModem;
+begin
+  Result := TMfskModem.Create(ASound, mmMFSK16);
+  Result.Frequency := MFSK16_MODE.CentreFreqHz;
+end;
+
 { 送信して波形を得る。前後に無音を付ける。 }
 function Transmit(AMake: TMakeModem; const AMsg: string;
   ALead: Integer = LEAD): TDoubleArray;
@@ -293,13 +299,20 @@ begin
   end;
 end;
 
+const
+  { **Phase 2 の復調器を全部** 並べる。MDM-008 は「Phase 2 の復調器を
+    Phase 3 の戦略として再利用できる」であって、一部ではない。
+    モードを足したらここにも足す ―― 足し忘れると、要求の文面だけが
+    広くて中身が追いついていない状態になる (README 40 章の轍)。 }
+  MODEM_COUNT = 4;
+
 var
-  GMake: array[0..2] of TMakeModem;
-  GName: array[0..2] of string;
-  GWave: array[0..2] of TDoubleArray;
+  GMake: array[0..MODEM_COUNT - 1] of TMakeModem;
+  GName: array[0..MODEM_COUNT - 1] of string;
+  GWave: array[0..MODEM_COUNT - 1] of TDoubleArray;
 
 { --------------------------------------------------------------------------
-  1. 前提: 3 つの復調器がそれぞれ自分の音を復号できる
+  1. 前提: すべての復調器がそれぞれ自分の音を復号できる
   -------------------------------------------------------------------------- }
 procedure TestBaseline;
 var
@@ -308,7 +321,7 @@ var
 begin
   WriteLn;
   WriteLn('--- 1. 前提: それぞれ自分の音を復号できる ---');
-  for i := 0 to 2 do
+  for i := 0 to MODEM_COUNT - 1 do
   begin
     GWave[i] := Transmit(GMake[i], MSG);
     txt := Trim(Receive(GMake[i], GWave[i], MODEM_BLOCK_SIZE));
@@ -335,7 +348,7 @@ var
 begin
   WriteLn;
   WriteLn('--- 2. 同じ音から同じ結果 (別の器) ---');
-  for i := 0 to 2 do
+  for i := 0 to MODEM_COUNT - 1 do
   begin
     s1 := TSink.Create;
     s2 := TSink.Create;
@@ -358,7 +371,7 @@ begin
 
     さらに **文字ではなく署名で比べる**。文字は同じまま軟判定の尺度だけが
     ずれることがあり、文字だけの比較では気づけない。 }
-  for i := 0 to 2 do
+  for i := 0 to MODEM_COUNT - 1 do
   begin
     bare := Transmit(GMake[i], MSG, 0);
     snd := TCaptureSoundDevice.Create;
@@ -410,7 +423,7 @@ var
 begin
   WriteLn;
   WriteLn('--- 4. 区画長を変えても同じ結果 ---');
-  for i := 0 to 2 do
+  for i := 0 to MODEM_COUNT - 1 do
   begin
     base := Receive(GMake[i], GWave[i], MODEM_BLOCK_SIZE);
     same := True;
@@ -443,7 +456,7 @@ var
 begin
   WriteLn;
   WriteLn('--- 5. 同種 2 器に同じ音を配る ---');
-  for i := 0 to 2 do
+  for i := 0 to MODEM_COUNT - 1 do
   begin
     solo := Receive(GMake[i], GWave[i], MODEM_BLOCK_SIZE);
     s1 := TSink.Create;
@@ -526,7 +539,7 @@ var
 begin
   WriteLn;
   WriteLn('--- 7. 位置の契約 (確定した区画の先頭) ---');
-  for i := 0 to 2 do
+  for i := 0 to MODEM_COUNT - 1 do
   begin
     s := TSink.Create;
     try
@@ -573,7 +586,7 @@ begin
     末尾を名乗る実装なら、これは区画 k+1 の先頭になって食い違う。 }
   WriteLn;
   WriteLn('--- 7b. 区画の先頭か末尾かを見分ける ---');
-  for i := 0 to 2 do
+  for i := 0 to MODEM_COUNT - 1 do
   begin
     s := TSink.Create;
     try
@@ -634,7 +647,7 @@ begin
   WriteLn;
   WriteLn('--- 8. 出所の名乗り ---');
   seen := '';
-  for i := 0 to 2 do
+  for i := 0 to MODEM_COUNT - 1 do
   begin
     s := TSink.Create;
     try
@@ -658,6 +671,7 @@ begin
   GMake[0] := @MakeCw;   GName[0] := 'CW';
   GMake[1] := @MakeRtty; GName[1] := 'RTTY';
   GMake[2] := @MakePsk;  GName[2] := 'PSK31';
+  GMake[3] := @MakeMfsk; GName[3] := 'MFSK16';
 
   TestBaseline;
   TestDeterminismAndReset;
