@@ -1002,6 +1002,39 @@ begin
     'test_regression (10分類のTest vectorsでCER)', rsVerified,
     '§12 Phase 2 MFSK', '');
 
+  { --- Olivia / Contestia ---
+    Baseline §12 の Phase 2 機能一覧に「Olivia/Contestia」とあるのに、
+    §18 に要求が一つも無かった。Waterfall (GUI-001) や Phase 2 の門
+    (MDM-008) と同じ抜けである。**一覧にあって表に無いものは、
+    進捗の突き合わせで必ず落ちる** ので、着手と同時に立てる。
+
+    Olivia は MFSK 系だが守り方が違う。MFSK16 は畳み込み符号と
+    インタリーバでビットを守る (MDM-009) のに対し、Olivia は
+    **1 文字を丸ごと一つの直交波形 (Walsh 関数) にする**。誤り訂正が
+    別の層にあるのではなく、展開そのものが誤り訂正である。
+    だから MDM-009 の部品は流用できず、別の層として立てている。
+
+    この層には自由度がほとんど無い。かき混ぜ符号のずらし量や斜めの向きを
+    一つ間違えれば上流と繋がらないが、**往復だけでは自分の間違いが
+    打ち消し合って通ってしまう**。そこで上流の C++ をそのまま動かして
+    採った既知解を期待値にしてある。 }
+  R('OLV-001', 'Olivia/Contestiaの符号の層が上流と一致する',
+    expCommunicate, objCompatibility, fndIntelligentReceiver,
+    [fndEngineeringQuality], False, priMust, 2,
+    'test_olivia_block (上流C++から採った既知解5件・アダマール変換の既知解・' +
+    '全文字の往復・Contestiaの文字割り当て・誤り耐性の実測・' +
+    '軟判定が硬判定より強いこと・かき混ぜと斜め置きの効き・位相選択の材料)',
+    rsVerified, '§12 Phase 2 Olivia/Contestia', '');
+
+  { Olivia をモードとして成立させる要求。音の層とブロックの頭出しが
+    まだ無いので起案のままにしてある。符号の層 (OLV-001) が揃ったことを
+    「Olivia ができた」と書かないための枠である (MDM-011 と同じ扱い)。 }
+  R('OLV-002', 'Olivia/Contestiaの送受信が成立する',
+    expCommunicate, objCompatibility, fndIntelligentReceiver,
+    [fndModernComputing], False, priMust, 2,
+    'Olivia モデムの往復試験と test_regression への追加', rsProposed,
+    '§12 Phase 2 Olivia/Contestia', '');
+
   R('MDM-008', 'Phase 2の復調器をPhase 3の戦略として再利用できる',
     expCommunicate, objRobustness, fndIntelligentReceiver,
     [fndEngineeringQuality], False, priMust, 2,

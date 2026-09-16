@@ -223,6 +223,41 @@ procedure ComplexFFT(var ABuf: TComplexArray);
   結果を要素数Nで除算した状態 (1/N規約) を返す。 }
 procedure InverseComplexFFT(var ABuf: TComplexArray);
 
+{ ============================================================================
+  高速アダマール変換 (Fast Hadamard Transform)
+
+  Olivia / Contestia の符号の層が使う。1 文字を長さ N の ±1 の並び
+  (Walsh 関数) に展開し、受信側でどの並びだったかを一度に判定する。
+  FFT の正弦波の代わりに ±1 の矩形波を基底にしたもので、乗算が要らず
+  加減算だけで済む。
+
+  規約
+  ----------------------------------------------------------------------------
+  どちらもスケーリングしない。順逆を続けて掛けると **N 倍** になる。
+  受信側は山の位置だけを見るので、この N 倍は害にならない ―― むしろ
+  「どれだけ揃っていたか」がそのまま山の高さになる。
+
+  単位ベクトル (位置 p だけ 1) を逆変換すると ±1 の並びになり、
+
+      InverseFastHadamard(delta_p)[t] = (-1)^(popcount(p) + popcount(p and t))
+
+  になる。上流 (Pawel Jalocha の pj_fht.h) の蝶の向きから決まる形で、
+  教科書の Sylvester 行列とは popcount(p) ぶん符号が違う。
+  試験ではこの式を期待値にしてある (実装とは別の道から出した値)。
+
+  Double でひとつだけ用意してあるのは、送信側 (±1) と受信側 (軟判定) で
+  同じ変換を使うためである。整数版と実数版を二本持つと、いずれ片方だけ
+  直して食い違う (X-05 と同じ理由)。値は 64 までの整数なので Double で
+  厳密に表せる。
+  ============================================================================ }
+
+{ 順変換。その場で書き換える。長さは 2 の冪乗であること。
+  Pawel Jalocha: FHT() (src/include/jalocha/pj_fht.h) }
+procedure FastHadamard(var AData: array of Double; ALen: Integer);
+{ 逆変換。その場で書き換える。
+  Pawel Jalocha: IFHT() }
+procedure InverseFastHadamard(var AData: array of Double; ALen: Integer);
+
 const
   { 滑る DFT の減衰。1 にすると丸め誤差が溜まり続ける (fldigi の K1)。 }
   SDFT_DAMPING = 0.99999999999;
@@ -994,6 +1029,73 @@ begin
     raise EDspError.CreateFmt(
       'FFT長は2以上の2の冪乗である必要があります (指定: %d)', [Length(ABuf)]);
   SharedFftPlan(Length(ABuf)).Inverse(ABuf);
+end;
+
+{ --- 高速アダマール変換 --- }
+
+procedure CheckHadamardLen(ALen: Integer);
+begin
+  if (ALen < 1) or not IsPowerOfTwo(ALen) then
+    raise EDspError.CreateFmt(
+      'アダマール変換の長さは 2 の冪乗です (指定 %d)', [ALen]);
+end;
+
+procedure FastHadamard(var AData: array of Double; ALen: Integer);
+var
+  step, p, q: Integer;
+  a, b: Double;
+begin
+  CheckHadamardLen(ALen);
+  if Length(AData) < ALen then
+    raise EDspError.CreateFmt(
+      'アダマール変換の配列が足りません (要求 %d / 受け取り %d)',
+      [ALen, Length(AData)]);
+  step := 1;
+  while step < ALen do
+  begin
+    p := 0;
+    while p < ALen do
+    begin
+      for q := p to p + step - 1 do
+      begin
+        a := AData[q];
+        b := AData[q + step];
+        AData[q] := b + a;
+        AData[q + step] := b - a;
+      end;
+      Inc(p, 2 * step);
+    end;
+    step := step * 2;
+  end;
+end;
+
+procedure InverseFastHadamard(var AData: array of Double; ALen: Integer);
+var
+  step, p, q: Integer;
+  a, b: Double;
+begin
+  CheckHadamardLen(ALen);
+  if Length(AData) < ALen then
+    raise EDspError.CreateFmt(
+      'アダマール変換の配列が足りません (要求 %d / 受け取り %d)',
+      [ALen, Length(AData)]);
+  step := ALen div 2;
+  while step >= 1 do
+  begin
+    p := 0;
+    while p < ALen do
+    begin
+      for q := p to p + step - 1 do
+      begin
+        a := AData[q];
+        b := AData[q + step];
+        AData[q] := a - b;
+        AData[q + step] := a + b;
+      end;
+      Inc(p, 2 * step);
+    end;
+    step := step div 2;
+  end;
 end;
 
 { TMovingAverage }

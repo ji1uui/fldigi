@@ -42,6 +42,7 @@ test/test_mfsk_varicode
 test/test_mfsk_tones
 test/test_mfsk_sync
 test/test_mfsk_modem
+test/test_olivia_block
 test/test_regression
 test/coverage/
 forms/DemoModemApp
