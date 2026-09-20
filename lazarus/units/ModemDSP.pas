@@ -224,6 +224,29 @@ procedure ComplexFFT(var ABuf: TComplexArray);
 procedure InverseComplexFFT(var ABuf: TComplexArray);
 
 { ============================================================================
+  実数列 2 本を 1 回の複素 FFT で
+
+  実数列 a[n] と b[n] を z[n] = a[n] + j b[n] として 1 回 FFT すると、
+  実数列の共役対称性から両方の spectrum を取り出せる。
+
+      A[k] = (Z[k] + conj(Z[N-k])) / 2
+      B[k] = (Z[k] - conj(Z[N-k])) / (2j)
+
+  Olivia の復調は半シンボルずつずらした窓を 2 枚同時に見るので、
+  この手が効く ―― N 点 FFT が 1 回で済み、2 回回すより半分になる。
+
+  上流 (pj_fft.h の SeparTwoReals) は 2 で割らず、bin 0 の虚部に
+  Nyquist bin を詰め込む。こちらは **割って、詰め込まない** ――
+  bin 0 と N/2 の扱いを特別にすると、使う側が知らずに踏む。
+  使うのは中ほどの bin だけなので、詰め込む利点が無い。
+  ============================================================================ }
+
+{ ABuf は FFT 済み (長さ N、2 の冪乗)。AOut0 / AOut1 に bin 0..N/2-1 を
+  入れて返す。長さが足りなければ伸ばす。 }
+procedure SplitTwoRealSpectra(const ABuf: TComplexArray;
+  var AOut0, AOut1: TComplexArray);
+
+{ ============================================================================
   高速アダマール変換 (Fast Hadamard Transform)
 
   Olivia / Contestia の符号の層が使う。1 文字を長さ N の ±1 の並び
@@ -1029,6 +1052,37 @@ begin
     raise EDspError.CreateFmt(
       'FFT長は2以上の2の冪乗である必要があります (指定: %d)', [Length(ABuf)]);
   SharedFftPlan(Length(ABuf)).Inverse(ABuf);
+end;
+
+{ --- 実数列 2 本の分離 --- }
+
+procedure SplitTwoRealSpectra(const ABuf: TComplexArray;
+  var AOut0, AOut1: TComplexArray);
+var
+  n, half, k, m: Integer;
+  zk, zn: TComplex;
+begin
+  n := Length(ABuf);
+  if (n < 2) or not IsPowerOfTwo(n) then
+    raise EDspError.CreateFmt(
+      '長さは 2 以上の 2 の冪乗です (指定 %d)', [n]);
+  half := n div 2;
+  if Length(AOut0) < half then SetLength(AOut0, half);
+  if Length(AOut1) < half then SetLength(AOut1, half);
+
+  for k := 0 to half - 1 do
+  begin
+    { k = 0 のとき N-k は N になるので 0 に折り返す。 }
+    m := (n - k) mod n;
+    zk := ABuf[k];
+    zn := ABuf[m];
+    { A[k] = (Z[k] + conj(Z[N-k])) / 2 }
+    AOut0[k].Re := 0.5 * (zk.Re + zn.Re);
+    AOut0[k].Im := 0.5 * (zk.Im - zn.Im);
+    { B[k] = (Z[k] - conj(Z[N-k])) / (2j) = -j (Z[k] - conj(Z[N-k])) / 2 }
+    AOut1[k].Re := 0.5 * (zk.Im + zn.Im);
+    AOut1[k].Im := 0.5 * (zn.Re - zk.Re);
+  end;
 end;
 
 { --- 高速アダマール変換 --- }

@@ -1026,13 +1026,36 @@ begin
     '軟判定が硬判定より強いこと・かき混ぜと斜め置きの効き・位相選択の材料)',
     rsVerified, '§12 Phase 2 Olivia/Contestia', '');
 
-  { Olivia をモードとして成立させる要求。音の層とブロックの頭出しが
-    まだ無いので起案のままにしてある。符号の層 (OLV-001) が揃ったことを
+  { Olivia の「音の層」。シンボル値をトーンにして音にし、音から
+    トーンを測って軟判定に落とすところ。
+
+    **ブロックの頭出しは含まない。** 1 回の取り込みで半シンボルずれた
+    2 枚の spectrum が出るところまでを持ち、どちらが区切りに合っている
+    かは次の層が選ぶ。文面をここまでに絞ってあるのは、頭出しまで含んだ
+    書き方にすると試験していない部分を覆ってしまうからである
+    (§36 §37 の轍。MDM-012 と MDM-013 を割ったのと同じ扱い)。
+
+    層の間ではビットの並び (最上位が先か最下位が先か) と軟判定の符号
+    (正が 0 か 1 か) が食い違いやすく、**どちらも音の層だけの往復試験
+    では見えない**。そこで符号の層 (OLV-001) へ実際に通して文字が戻る
+    ことまでを試験に含めてある。 }
+  R('OLV-003', 'Olivia/Contestiaの音の層が仕様どおり動く',
+    expCommunicate, objRobustness, fndIntelligentReceiver,
+    [fndModernComputing], False, priMust, 2,
+    'test_olivia_tones (トーンの置き場所が上流の式と一致・実数列2本を' +
+    '1回のFFTで分ける・包絡線の平坦さと占有帯域・3諸元での往復・' +
+    '2枚のspectrumのうち合うのは片方だけ・Grayの隣接1bit性・' +
+    '符号の層への噛み合い・周波数ずれの補正・雑音耐性の実測)',
+    rsVerified, '§12 Phase 2 Olivia/Contestia', '');
+
+  { Olivia をモードとして成立させる要求。ブロックの頭出しがまだ無いので
+    起案のままにしてある。部品 (OLV-001 / OLV-003) が揃ったことを
     「Olivia ができた」と書かないための枠である (MDM-011 と同じ扱い)。 }
   R('OLV-002', 'Olivia/Contestiaの送受信が成立する',
     expCommunicate, objCompatibility, fndIntelligentReceiver,
     [fndModernComputing], False, priMust, 2,
-    'Olivia モデムの往復試験と test_regression への追加', rsProposed,
+    'Olivia モデムの往復試験と test_regression への追加 ' +
+    '(ブロックの頭出しが要る)', rsProposed,
     '§12 Phase 2 Olivia/Contestia', '');
 
   R('MDM-008', 'Phase 2の復調器をPhase 3の戦略として再利用できる',
