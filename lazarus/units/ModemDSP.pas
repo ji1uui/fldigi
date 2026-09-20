@@ -37,6 +37,9 @@
 unit ModemDSP;
 
 {$mode objfpc}{$H+}
+{ TLowPass3 が record にメソッドを持つため。record の並びや大きさは
+  変わらないので、既存の型に影響しない。 }
+{$modeswitch advancedrecords}
 
 interface
 
@@ -357,6 +360,29 @@ type
     function Run(AValue: Double): Double;
     { 平均長。呼び出し側が「フィルタが満ちるまで」を数えるために使う。 }
     property Len: Integer read FLen;
+  end;
+
+  { TLowPass3
+    ---------------------------------------------------------------------
+    Pawel Jalocha: class LowPass3_Filter (jalocha/pj_lowpass3.h)
+
+    3 段重ねの IIR 平均。ならすための道具としては ModemDSP に 3 つ目に
+    なるので、何が違うかを書いておく。
+
+      DecayAvg        1 段。速いが行き過ぎる (overshoot が大きい)
+      TMovingAverage  窓の中を平等に。窓を抜けた瞬間に値が飛ぶ
+      TLowPass3       3 段 + 弱い帰還。行き過ぎが Feedback=0.1 で約 1e-6
+
+    Olivia の同期が使う。ここは「どの位相がいちばん強いか」を選ぶための
+    尺度で、**行き過ぎると一瞬だけ別の位相が勝ってしまい、ブロックを
+    丸ごと取り落とす**。段数を増やしてでも行き過ぎを潰す価値がある。
+
+    確保しない (record)。位相の数だけ並べるので、1 つずつが軽いこと。 }
+  TLowPass3 = record
+    Out1, Out2, Output: Double;
+    { AWeight は 1/(ならす長さ)。AFeedback は行き過ぎの抑え (既定 0.1)。 }
+    procedure Process(AInput, AWeight: Double; AFeedback: Double = 0.1);
+    procedure Reset(ALevel: Double = 0);
   end;
 
   { TComplexLowpass
@@ -1203,6 +1229,32 @@ begin
   if FPtr >= FLen then
     FPtr := 0;
   Result := FSum / FLen;
+end;
+
+{ TLowPass3 }
+
+procedure TLowPass3.Process(AInput, AWeight: Double; AFeedback: Double);
+var
+  w, d1, d2, d3: Double;
+begin
+  { 上流は Weight を 2 倍してから使う。段が 3 つあるぶん 1 段あたりの
+    時定数を短くしておく、という意味である。写したときに 2 倍を
+    落とすと、ならしが 2 倍遅くなって同期の追従が鈍る。 }
+  w := AWeight * 2.0;
+  d1 := AInput - Out1;
+  d2 := Out1 - Out2;
+  d3 := Out2 - Output;
+  Out1 := Out1 + d1 * w;
+  Out2 := Out2 + d2 * w;
+  Output := Output + d3 * w;
+  Out2 := Out2 + d3 * w * AFeedback;
+end;
+
+procedure TLowPass3.Reset(ALevel: Double);
+begin
+  Out1 := ALevel;
+  Out2 := ALevel;
+  Output := ALevel;
 end;
 
 { TComplexLowpass }

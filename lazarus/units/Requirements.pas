@@ -1048,14 +1048,32 @@ begin
     '符号の層への噛み合い・周波数ずれの補正・雑音耐性の実測)',
     rsVerified, '§12 Phase 2 Olivia/Contestia', '');
 
-  { Olivia をモードとして成立させる要求。ブロックの頭出しがまだ無いので
-    起案のままにしてある。部品 (OLV-001 / OLV-003) が揃ったことを
-    「Olivia ができた」と書かないための枠である (MDM-011 と同じ扱い)。 }
+  { Olivia の「ブロックの頭出し」。音の層と符号の層の間に入り、
+    どこがブロックの切れ目かを決める。
+
+    Olivia には前置き符号も同期語も無い。1 ブロック 64 シンボルのどこが
+    先頭かは、**復号してみた結果の良さ**からしか決められない。考えられる
+    切れ目を全部並べ、いちばん筋の通るものを採る。
+
+    「出ないこと」も要求のうちである。門 (S/N の下限) が無ければ雑音から
+    でも文字が出てしまう。無音でも雑音だけでも黙ることを試験で見ている。 }
+  R('OLV-004', 'Olivia/Contestiaがブロックの切れ目を見つける',
+    expCommunicate, objRobustness, fndIntelligentReceiver,
+    [fndModernComputing], False, priMust, 2,
+    'test_olivia_sync (1ブロック64通りすべての開始位置で本文が出る・' +
+    '掴んだ切れ目が開始位置と一対一・遅れの実測・雑音耐性の実測・' +
+    '無音と雑音だけでは喋らない・門を下げれば喋る・Contestia・' +
+    '周波数ずれ・Resetでの持ち越しなし)', rsVerified,
+    '§12 Phase 2 Olivia/Contestia', '');
+
+  { Olivia をモードとして成立させる要求。部品 (OLV-001 / OLV-003 /
+    OLV-004) が揃ったことを「Olivia ができた」と書かないための枠である
+    (MDM-011 と同じ扱い)。残るのは TCustomModem への繋ぎこみと、
+    回帰試験への追加。 }
   R('OLV-002', 'Olivia/Contestiaの送受信が成立する',
     expCommunicate, objCompatibility, fndIntelligentReceiver,
     [fndModernComputing], False, priMust, 2,
-    'Olivia モデムの往復試験と test_regression への追加 ' +
-    '(ブロックの頭出しが要る)', rsProposed,
+    'Olivia モデムの往復試験と test_regression への追加', rsProposed,
     '§12 Phase 2 Olivia/Contestia', '');
 
   R('MDM-008', 'Phase 2の復調器をPhase 3の戦略として再利用できる',

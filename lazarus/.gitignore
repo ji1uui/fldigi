@@ -44,6 +44,7 @@ test/test_mfsk_sync
 test/test_mfsk_modem
 test/test_olivia_block
 test/test_olivia_tones
+test/test_olivia_sync
 test/test_regression
 test/coverage/
 forms/DemoModemApp
