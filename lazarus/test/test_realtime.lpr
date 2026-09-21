@@ -472,6 +472,161 @@ begin
   end;
 end;
 
+{ --------------------------------------------------------------------------
+  あとから足したモデムの送受信経路 (RT-001 の文面は「**全モデム**」)
+
+  RT-001 と RT-002 には「モデムを足したら試験も足すこと」と書いてある。
+  ところが RT-002 (deadline) には足したのに、**RT-001 (確保) には
+  足していなかった** ―― CW の受信、MFSK16 の送受信、Olivia の送受信が
+  どれも入っていない。PSK を足したときと同じ抜けを、また繰り返している。
+
+  以後また増えるので、1 つずつ手で書くのをやめて共通の手順にした。
+  モデムを足したら下の表に 1 行足すだけで済む。
+  -------------------------------------------------------------------------- }
+type
+  TMakeAnyModem = function(ASound: TCustomSoundDevice): TCustomModem;
+
+function MakeCwModem(ASound: TCustomSoundDevice): TCustomModem;
+var
+  m: TCwModem;
+begin
+  m := TCwModem.Create(ASound);
+  m.Frequency := 700;
+  m.SetCwSpeed(20);
+  m.CwTrack := False;
+  Result := m;
+end;
+
+function MakeMfskModem(ASound: TCustomSoundDevice): TCustomModem;
+begin
+  Result := TMfskModem.Create(ASound, mmMFSK16);
+  Result.Frequency := MFSK16_MODE.CentreFreqHz;
+end;
+
+function MakeOliviaModem(ASound: TCustomSoundDevice): TCustomModem;
+begin
+  Result := TOliviaModem.Create(ASound, mmOlivia, 5, 1000);
+end;
+
+procedure MeasureTxAlloc(const AName: string; AMake: TMakeAnyModem);
+var
+  snd: TCaptureSoundDevice;
+  tx: TCustomModem;
+  src: TTxSource;
+  guard, res: Integer;
+  alloc: Int64;
+begin
+  snd := TCaptureSoundDevice.Create;
+  tx := AMake(snd);
+  src := TTxSource.Create('CQ CQ DE JI1UUI K');
+  try
+    tx.OnGetTxChar := @src.GetTxChar;
+    tx.TxInit;
+    tx.TxProcess;   { 1 回ぶん先に流してバッファを確保させる }
+
+    BeginMeasure;
+    guard := 0;
+    repeat
+      res := tx.TxProcess;
+      Inc(guard);
+    until (res < 0) or (guard > 100000);
+    EndMeasure;
+    alloc := GGetMemCount + GReallocCount;
+
+    WriteLn(Format('  %-8s 送信 %7d サンプル: 確保 %d 回',
+      [AName, snd.Count, alloc]));
+    Check(alloc <= MAX_TX_ALLOC, Format(
+      '%s: 確保回数が送信量に比例しない (%d 回 / 上限 %d)',
+      [AName, alloc, MAX_TX_ALLOC]));
+  finally
+    src.Free; tx.Free; snd.Free;
+  end;
+end;
+
+{ 受信ブロックの確保が**ブロック数に比例しないこと**を見る。
+
+  はじめ「確保 0 回」と書いたが、それはモデムによって成り立たない。
+  CW は無音のあとに**語間の空白を 1 文字**出す (それが CW の作法である)。
+  文字が出れば Evidence の候補配列を作るので確保が入る。0 を要求すると、
+  正しい振る舞いのほうを不具合に見せてしまう。
+
+  そこで **100 ブロックと 200 ブロックで測り、増えないこと**を見る。
+  1 ブロックごとに確保していれば倍になる。立ち上がりの固定費は
+  両方に等しく乗るので差に出ない。0 を要求するより強く、しかも
+  モードごとの作法を壊さない。
+
+  AQuiet: 無信号として流す波形。**モデムによって「何も出ない音」が違う。**
+  弱い純音は PSK では何も出さないが、CW の追尾フィルタは拾ってしまう。 }
+type
+  TQuietKind = (qkWeakTone, qkSilence);
+
+function RunRxAlloc(AMake: TMakeAnyModem; ABlocks: Integer;
+  AQuiet: TQuietKind; out AChars: Integer): Int64;
+var
+  snd: TCaptureSoundDevice;
+  rx: TCustomModem;
+  sink: TEvidenceSink;
+  buf: array[0..511] of Double;
+  i, k: Integer;
+begin
+  snd := TCaptureSoundDevice.Create;
+  rx := AMake(snd);
+  sink := TEvidenceSink.Create;
+  try
+    rx.RxInit;
+    rx.OnDecode := @sink.Decode;
+    for i := 0 to High(buf) do
+      if AQuiet = qkSilence then buf[i] := 0
+      else buf[i] := 0.001 * Sin(i * 0.37);
+    rx.RxProcess(buf, Length(buf));   { 初回の確保を済ませる }
+
+    BeginMeasure;
+    for k := 1 to ABlocks do
+      rx.RxProcess(buf, Length(buf));
+    EndMeasure;
+    Result := GGetMemCount + GReallocCount;
+    AChars := sink.Count;
+  finally
+    sink.Free; rx.Free; snd.Free;
+  end;
+end;
+
+procedure MeasureRxAlloc(const AName: string; AMake: TMakeAnyModem;
+  AQuiet: TQuietKind = qkWeakTone);
+const
+  SLACK = 4;   { 立ち上がりのばらつきぶん。比例していれば桁で超える。 }
+var
+  a1, a2: Int64;
+  c1, c2: Integer;
+begin
+  a1 := RunRxAlloc(AMake, 100, AQuiet, c1);
+  a2 := RunRxAlloc(AMake, 200, AQuiet, c2);
+  WriteLn(Format('  %-8s 受信 100/200 ブロック: 確保 %d/%d 回 / 出力 %d/%d 文字',
+    [AName, a1, a2, c1, c2]));
+  Check(a2 <= a1 + SLACK,
+    Format('%s: 確保がブロック数に比例しない (100->%d / 200->%d)',
+      [AName, a1, a2]));
+  Check(c2 <= c1 + 1,
+    Format('%s: 出力もブロック数に比例しない (100->%d / 200->%d)',
+      [AName, c1, c2]));
+end;
+
+procedure TestRemainingModemsAreAllocationFree;
+begin
+  WriteLn;
+  WriteLn('--- 7. あとから足したモデムの送受信経路 (RT-001) ---');
+  MeasureTxAlloc('CW', @MakeCwModem);
+  { CW だけ無音にする。弱い純音 (470 Hz) を CW の追尾フィルタが拾って
+    1 文字出してしまい、「文字が出ないブロック」の試験にならなかった。
+    off-frequency とはいえ coherent な音なので、拾うこと自体は不具合
+    ではない ―― 試験の前提のほうが合っていなかった。 }
+  MeasureRxAlloc('CW', @MakeCwModem, qkSilence);
+  MeasureTxAlloc('MFSK16', @MakeMfskModem);
+  MeasureRxAlloc('MFSK16', @MakeMfskModem);
+  MeasureTxAlloc('Olivia', @MakeOliviaModem);
+  MeasureRxAlloc('Olivia', @MakeOliviaModem);
+end;
+
 procedure TestRxDeadlineMargin;
 var
   snd: TCaptureSoundDevice;
@@ -679,6 +834,7 @@ begin
     TestCwTxPathIsAllocationFree;
     TestPskTxPathIsAllocationFree;
     TestPskRxBlockIsAllocationFree;
+    TestRemainingModemsAreAllocationFree;
   finally
     RestoreMM;
   end;

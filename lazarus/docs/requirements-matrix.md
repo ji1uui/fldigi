@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 71 件 (検証済 53 / 実装済 1 / 方針決定 3 / 起案 6 / 後送り 8)
+要求 71 件 (検証済 54 / 実装済 1 / 方針決定 3 / 起案 6 / 後送り 7)
 
 ## Phase 0
 
@@ -23,8 +23,8 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | ARC-002 | Modem APIが複数候補とEvidenceを返せる | Communicate | D | Y | Z | No | Must | test_evidence | 検証済 | ✓ | §6, §19 ADR-002 | ADR-002 |
 | ARC-003 | Subscriber例外でEvent Bus全体を停止させない | Communicate | B | Z | - | No | Must | test_eventbus | 検証済 | ✓ | §12 | ADR-001 |
 | ARC-004 | 高頻度イベントで復調文字を押し出さない (conflation) | Communicate | B | Z | X | No | Should | test_eventbus / test_observability | 検証済 | ✓ | §12 | ADR-001 |
-| RT-001 | realtime経路で動的確保を行わない | Communicate | C | X | Z | No | Must | test_realtime (**全モデム**の送受信経路で確保回数を実測) | 検証済 | ✓ | §4 X-04。モデムを足したら試験も足すこと (PSK を足したとき漏れた) | ADR-009 |
-| RT-002 | ブロック処理がdeadlineを守る | Communicate | C | X | Z | No | Must | test_realtime (**全モデム**の受信ブロックで deadline 比を実測) | 検証済 | ✓ | §14 Z-04。モデムを足したら試験も足すこと (PSK を足したとき漏れた) | ADR-009 |
+| RT-001 | realtime経路で動的確保を行わない | Communicate | C | X | Z | No | Must | test_realtime (CW/RTTY/PSK31/MFSK16/Olivia の送受信経路。受信は 100 と 200 ブロックで測り、確保も出力もブロック数に比例しないこと) | 検証済 | ✓ | §4 X-04。モデムを足したら試験も足すこと (PSK で一度、MFSK と Olivia でもう一度漏れた) | ADR-009 |
+| RT-002 | ブロック処理がdeadlineを守る | Communicate | C | X | Z | No | Must | test_realtime (CW/RTTY/PSK31/MFSK16/Olivia の受信ブロックで deadline 比を実測) | 検証済 | ✓ | §14 Z-04。モデムを足したら試験も足すこと (PSK を足したとき漏れた) | ADR-009 |
 | RT-003 | 並行性は要求から導き、並列性は実測から導く | Communicate | C | X | - | No | Should | 実測 (README §16) | 方針決定 |  | §4 X-03 | ADR-009 |
 | OBS-001 | 障害診断のため出来事を時系列で残す | Communicate | B | Z | - | No | Must | test_observability | 検証済 | ✓ | §14 Z-01 | ADR-010 |
 | OBS-002 | 観測の記録が動的確保を行わない | Communicate | C | Z | X | No | Must | test_observability (確保回数を実測) | 検証済 | ✓ | §14 Z-01, X-04 | ADR-010 |
@@ -91,7 +91,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 | REQ-ID | 要求 | Exp | Obj | Pri | Sec | Ext | Prio | Verification | Status | 検証 | 出典 | ADR |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | RTTY-021 | QSB時に複数復調戦略を比較 | Communicate | C | Y | X/Z | No | Must | Golden WAV BER/CER | 起案 |  | §18 | ADR-002 |
-| SPC-002 | 雑音推定を共有サービス化し全戦略が同じ雑音床を見る | Communicate | B | Y | X | No | Must | SPC-001 の電力密度を用いた雑音床推定の較正試験 (Phase 3) | 後送り |  | §4 X-05 |  |
+| SPC-002 | 雑音推定を共有サービス化し全戦略が同じ雑音床を見る | Communicate | B | Y | X | No | Must | test_noise (白色雑音の密度が理論値 2*sigma^2/Fs に載ること: 分位点4種・FFT長3種・窓3種/強い信号8本でも動かないこと (平均との対比)/帯域S/Nの追随/取りこぼしと流し直しの申告/ならし/確保しない) | 検証済 | ✓ | §4 X-05, §12 Phase 3 Noise Estimator |  |
 | MDM-006 | PSKがAFCで周波数ドリフトに追従する | Communicate | B | Y | - | No | Should | test_regression (Frequency drift の上限を既知の限界から引き下げる) | 後送り |  | Baseline Phase 3 Adaptive Receiver の AFC。実測: 60Hz ドリフトで PSK31/63 は本文CER 0.79/0.86、CW と RTTY(AFC) は 0.00 |  |
 
 ## Phase 4

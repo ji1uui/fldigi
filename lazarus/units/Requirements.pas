@@ -64,7 +64,20 @@ const
     「そのフェーズに着手した」という宣言であって、完了の宣言ではない。
     上げた瞬間にそのフェーズの要求が「検証済」を名乗れるようになるので、
     実際に試験が申告しているかは test_requirements が突き合わせる。 }
-  CURRENT_PHASE = 2;
+  { Phase 2 を終えて Phase 3 へ入った。判断の根拠を残す。
+
+      - Baseline §12 Phase 2 の**完了条件** (「Phase 2 Decoder は Phase 3 の
+        Normal 戦略として再利用可能」) は MDM-008 で検証済み
+      - 機能一覧は CW / RTTY / PSK31,63 / Olivia,Contestia / MFSK /
+        Audio / CAT,Hamlib / Macros / Logging / Basic Waterfall のうち、
+        **Waterfall の描画 (GUI-002) だけが残っている**
+      - GUI-002 が残るのは実装の遅れではなく、**この環境に LCL が
+        入っていない**ためである。表示の論理 (GUI-001) は無画面で
+        検証済みで、描画だけが建てられない
+
+    進めるとき、Phase 3 に後送りしてあった要求が「現在フェーズ以下」の
+    警告として出る。それが狙いで、後送りの期限が来たことが見える。 }
+  CURRENT_PHASE = 3;
 
 type
   ERequirementsError = class(Exception);
@@ -665,13 +678,17 @@ begin
   R('RT-001', 'realtime経路で動的確保を行わない',
     expCommunicate, objPerformance, fndModernComputing,
     [fndEngineeringQuality], False, priMust, 0,
-    'test_realtime (**全モデム**の送受信経路で確保回数を実測)', rsVerified,
-    '§4 X-04。モデムを足したら試験も足すこと (PSK を足したとき漏れた)',
+    'test_realtime (CW/RTTY/PSK31/MFSK16/Olivia の送受信経路。受信は ' +
+    '100 と 200 ブロックで測り、確保も出力もブロック数に比例しないこと)',
+    rsVerified,
+    '§4 X-04。モデムを足したら試験も足すこと ' +
+    '(PSK で一度、MFSK と Olivia でもう一度漏れた)',
     'ADR-009');
   R('RT-002', 'ブロック処理がdeadlineを守る',
     expCommunicate, objPerformance, fndModernComputing,
     [fndEngineeringQuality], False, priMust, 0,
-    'test_realtime (**全モデム**の受信ブロックで deadline 比を実測)',
+    'test_realtime (CW/RTTY/PSK31/MFSK16/Olivia の受信ブロックで ' +
+    'deadline 比を実測)',
     rsVerified,
     '§14 Z-04。モデムを足したら試験も足すこと (PSK を足したとき漏れた)',
     'ADR-009');
@@ -735,11 +752,18 @@ begin
     [fndIntelligentReceiver], False, priMust, 1,
     'test_spectrum (既知正弦波の絶対値・複数読み手の一致・取りこぼしの申告・' +
     '窓とFFT長に依らない雑音密度)', rsVerified, '§4 X-05, §5.1', 'ADR-001');
+  { 平均ではなく分位点で測る。平均は強い信号に引きずられ、信号が
+    立っただけで雑音床が持ち上がってしまう。ただし分位点はそのままでは
+    平均より小さいので、**指数分布の分位点と平均の関係で較正する** ――
+    しないと S/N を良く申告する方向に外れる。
+    較正と頑丈さは対で見る。片方だけならもう片方を壊しても通る。 }
   R('SPC-002', '雑音推定を共有サービス化し全戦略が同じ雑音床を見る',
     expCommunicate, objRobustness, fndIntelligentReceiver,
     [fndModernComputing], False, priMust, 3,
-    'SPC-001 の電力密度を用いた雑音床推定の較正試験 (Phase 3)', rsDeferred,
-    '§4 X-05', '');
+    'test_noise (白色雑音の密度が理論値 2*sigma^2/Fs に載ること: 分位点4種・' +
+    'FFT長3種・窓3種/強い信号8本でも動かないこと (平均との対比)/' +
+    '帯域S/Nの追随/取りこぼしと流し直しの申告/ならし/確保しない)',
+    rsVerified, '§4 X-05, §12 Phase 3 Noise Estimator', '');
 
   R('OBS-001', '障害診断のため出来事を時系列で残す',
     expCommunicate, objRobustness, fndEngineeringQuality, [],
