@@ -31,7 +31,7 @@ uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   Classes, SysUtils, Math,
   SoundIntf, ModemTypes, Modem, ModemDSP, DecodeEvidence,
-  SpectrumService, WaterfallModel,
+  SpectrumService, WaterfallModel, NoiseEstimator,
   RttyModemImpl, CwModemImpl, PskModemImpl, MfskModemImpl, MfskTones,
   OliviaModemImpl,
   TestSupport, Requirements;
@@ -689,11 +689,17 @@ end;
   モデムのほかに共有サービスが居る。
 
       音声 --> モデム (復調)
-           +-> SpectrumService (FFT 8192)  --> WaterfallModel (表示の格子)
+           +-> SpectrumService (FFT 8192)  +-> WaterfallModel (表示の格子)
+                                           +-> NoiseEstimator (雑音床)
 
   Spectrum と Waterfall はモデムではないので RT-002 の文面に入らず、
   あとから足したのにどの deadline 試験にも入っていなかった。
   復調が間に合っていても、滝を出した瞬間に間に合わなくなれば同じことである。
+
+  NoiseEstimator (SPC-002) も同じ轍を踏みかけた。**受信経路に足した部品は
+  受信経路の測定にも足す** ―― これを規律として書いておく。雑音床は
+  枠ごとに 4094 本を並べ替えて分位点を取るので、FFT ほどではないが
+  ただではない。しかも Phase 3 の戦略はみなこれを土台にする。
 
   Spectrum は hop 2048 なので **4 ブロックに 1 回だけ** 8192 点 FFT を回す。
   平均は小さく、その 1 ブロックだけ跳ねる。だから平均ではなく
@@ -706,24 +712,40 @@ const
   SR = 8000;
   WARMUP = 200;
   SAMPLES = 2000;
+  POOLBLKS = 64;             { 使い回す音の長さ [ブロック] }
+  NOISEAMP = 0.05;           { 一様雑音の振幅。理論値の出どころ }
 var
   buf: array[0..BLK - 1] of Double;
+  pool: TDoubleArray;        { 測定の前に作る。測定中は確保しない }
   ms: TDoubleArray;
   snd: TCaptureSoundDevice;
   rx: array[0..2] of TRttyModem;
   sp: TSpectrumService;
   wf: TWaterfallModel;
+  ne: TNoiseEstimator;
+  ni: TNoiseUpdateInfo;
   i, k, n: Integer;
   t0: Double;
+  expDb: Double;
   expected: Int64;
 begin
-  ms := nil;
+  ms := nil; pool := nil;
   SetLength(ms, SAMPLES);
-  for i := 0 to BLK - 1 do
-    buf[i] := 0.3 * Sin(2 * Pi * 1000 * i / SR) + 0.05 * Sin(i * 0.7);
+  SetLength(pool, POOLBLKS * BLK);
+  { 信号 + **本物の雑音**。雑音床を測る部品を経路に入れた以上、
+    無雑音の正弦だけを流したのでは意味が無い。しかも **同じ 1 ブロックを
+    繰り返してはいけない** ―― 512 標本周期の完全な周期信号になり、
+    8192 点 FFT では 16 本おきの線スペクトルになって、それ以外の bin が
+    数値的に 0 になる。分位点は当然 0 になり、雑音床は下限に張り付く
+    (実際そうなった)。だから 64 ブロックぶんを作って順に流す。
+    RandSeed を固定するので走らせるたびに同じ音になる (Z-05)。 }
+  RandSeed := 20240921;
+  for i := 0 to POOLBLKS * BLK - 1 do
+    pool[i] := 0.3 * Sin(2 * Pi * 1000 * i / SR) + NOISEAMP * (2 * Random - 1);
+  Move(pool[0], buf[0], BLK * SizeOf(Double));
 
   snd := TCaptureSoundDevice.Create;
-  sp := nil; wf := nil;
+  sp := nil; wf := nil; ne := nil;
   for i := 0 to 2 do rx[i] := nil;
   try
     for i := 0 to AModems - 1 do
@@ -737,19 +759,26 @@ begin
     begin
       sp := TSpectrumService.Create;          { 既定 8192 / hop 2048 }
       wf := TWaterfallModel.Create(sp);       { 既定 800 列 x 256 行 }
+      ne := TNoiseEstimator.Create(sp);       { 既定 中央値 / ならし 8 枠 }
     end;
 
     for k := 1 to WARMUP do
     begin
+      Move(pool[(k mod POOLBLKS) * BLK], buf[0], BLK * SizeOf(Double));
       for i := 0 to AModems - 1 do rx[i].RxProcess(buf, BLK);
-      if AWithSpectrum then begin sp.Feed(buf, BLK); wf.Pump; end;
+      if AWithSpectrum then
+      begin sp.Feed(buf, BLK); wf.Pump; ne.Update(ni); end;
     end;
 
     for k := 0 to SAMPLES - 1 do
     begin
+      { 次のブロックを用意するのは **時計を回す前**。音の用意は
+        受信経路の仕事ではないので、測定に混ぜない。 }
+      Move(pool[(k mod POOLBLKS) * BLK], buf[0], BLK * SizeOf(Double));
       t0 := HiResSeconds;
       for i := 0 to AModems - 1 do rx[i].RxProcess(buf, BLK);
-      if AWithSpectrum then begin sp.Feed(buf, BLK); wf.Pump; end;
+      if AWithSpectrum then
+      begin sp.Feed(buf, BLK); wf.Pump; ne.Update(ni); end;
       ms[k] := (HiResSeconds - t0) * 1000;
     end;
 
@@ -781,9 +810,33 @@ begin
       Check(sp.FramesProduced = expected, Format(
         '**FFT の回数が仕様どおり** (%d 区画で %d 枠 / 実際 %d)',
         [WARMUP + SAMPLES, expected, sp.FramesProduced]));
+
+      { 雑音床は **出た枠を一つ残らず** 食べていること。
+        取りこぼしがあると偏った標本で雑音床を作ることになり、
+        しかも速く見える ―― 速さを取りこぼしで買っていないことを
+        ここで縛る。枠の保持数 (既定 64) を超えて溜め込めば落ちる。 }
+      Check(ne.FramesUsed = sp.FramesProduced, Format(
+        '**雑音床が枠を取りこぼしていない** (出 %d / 食 %d)',
+        [sp.FramesProduced, ne.FramesUsed]));
+      Check(ne.Ready, '雑音床が使える状態になっている');
+
+      { **速いだけでなく、合っていること。**
+        滝と雑音床は同じ SpectrumService を二つの reader で読む。
+        この組み合わせは他のどの試験にも無い ―― test_noise は
+        雑音床だけで回している。読み手が増えても正しい値が出ることを
+        ここで押さえる。
+        期待値は生成側の振幅から **理論で** 立てる: 振幅 a の一様雑音は
+        分散 (2a)^2/12、片側電力密度は 2*sigma^2/Fs (SPC-001 と同じ式)。
+        較正係数 -ln(1-p) を外すと 1.59 dB ずれて落ちる。 }
+      expDb := PowerToDb(2 * (4 * NOISEAMP * NOISEAMP / 12.0) / SR);
+      Check(Abs(ne.NoiseDensityDb - expDb) < 1.0, Format(
+        '**滝と共存しても雑音床が理論値に載る** (理論 %.1f dB / 実測 %.1f dB)',
+        [expDb, ne.NoiseDensityDb]));
+      WriteLn(Format('    (雑音床 %.1f dB / 理論 %.1f dB / 枠 %d)',
+        [ne.NoiseDensityDb, expDb, ne.FramesUsed]));
     end;
   finally
-    wf.Free; sp.Free;
+    ne.Free; wf.Free; sp.Free;
     for i := 0 to 2 do rx[i].Free;
     snd.Free;
   end;
@@ -794,8 +847,8 @@ var
   st, stPortfolio: TBlockTiming;
 begin
   WriteLn;
-  WriteLn('--- 受信経路全体 (モデム + Spectrum + Waterfall) の deadline 余裕 ---');
-  MeasureChain('RTTY + Spectrum(8192) + Waterfall(800x256)', 1, True, st);
+  WriteLn('--- 受信経路全体 (モデム + Spectrum + Waterfall + 雑音床) の deadline 余裕 ---');
+  MeasureChain('RTTY + Spectrum(8192) + Waterfall(800x256) + Noise', 1, True, st);
   Check(st.MeanRatio < MAX_MEAN_RATIO, Format(
     '**経路全体の平均が deadline の %.0f%% 未満** (実際 %.2f%%)',
     [100 * MAX_MEAN_RATIO, 100 * st.MeanRatio]));
@@ -812,7 +865,7 @@ begin
     「絶対に落とさない側」の最悪値だけに掛ける。 }
   WriteLn;
   WriteLn('  [Phase 3 の見積り] 戦略を 3 本並べたとき');
-  MeasureChain('RTTY x3 + Spectrum + Waterfall', 3, True, stPortfolio);
+  MeasureChain('RTTY x3 + Spectrum + Waterfall + Noise', 3, True, stPortfolio);
   Check(stPortfolio.MaxRatio < MAX_PEAK_RATIO, Format(
     '戦略 3 本でも最悪が deadline の %.0f%% 未満 (実際 %.2f%%)',
     [100 * MAX_PEAK_RATIO, 100 * stPortfolio.MaxRatio]));

@@ -67,7 +67,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | GUI-001 | スペクトルの履歴を表示用の段階値に変換し列と周波数を対応づける | Discover | D | X | Z | No | Must | test_waterfall (細い信号の保存・利得変化への追従・拡大時の対応・流し直しでの履歴破棄・取りこぼしの申告) | 検証済 | ✓ | §12 Phase 2 |  |
 | GUI-002 | Waterfallを画面に描画し操作できるようにする | Discover | D | X | - | No | Must | LCL 環境での描画結合試験と目視確認 | 起案 |  | §12 Phase 2 |  |
-| RT-009 | Waterfallを含む受信経路全体がdeadlineを守る | Communicate | C | X | Z | No | Must | test_realtime (モデム + Spectrum(8192) + Waterfall を 1 区画ぶん通して実測。FFT は 4 区画に 1 回跳ねるので p99 と最悪で判定) | 検証済 | ✓ | §14 Z-04, §17 CPU/Latency |  |
+| RT-009 | Waterfallを含む受信経路全体がdeadlineを守る | Communicate | C | X | Z | No | Must | test_realtime (モデム + Spectrum(8192) + Waterfall + 雑音床 を 1 区画ぶん通して実測。FFT は 4 区画に 1 回跳ねるので p99 と最悪で判定。雑音床が枠を取りこぼしていないことも同時に縛る) | 検証済 | ✓ | §14 Z-04, §17 CPU/Latency |  |
 | MDM-003 | BPSK (PSK31/63/125) の送受信が成立する | Communicate | A | Y | Z | No | Must | test_psk (往復・雑音耐性・全印字文字) | 検証済 | ✓ | Baseline Phase 2 Practical Compatible Core |  |
 | MDM-004 | PSK復調が軟判定の尺度をEvidenceに載せる | Communicate | D | Y | Z | No | Should | test_psk (本文と雑音の余裕が分離することを実測) | 検証済 | ✓ | ADR-002 / §7 Phase 4 の Confidence の材料 | ADR-002 |
 | MDM-005 | PSK31 VaricodeがfldigiのTableと一致する | Communicate | A | Z | - | No | Must | test_psk_varicode (往復・符号の形・長さ分布・一意性) | 検証済 | ✓ | fldigi src/psk/pskvaricode.cxx |  |

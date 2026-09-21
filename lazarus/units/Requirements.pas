@@ -716,8 +716,9 @@ begin
   R('RT-009', 'Waterfallを含む受信経路全体がdeadlineを守る',
     expCommunicate, objPerformance, fndModernComputing,
     [fndEngineeringQuality], False, priMust, 2,
-    'test_realtime (モデム + Spectrum(8192) + Waterfall を 1 区画ぶん通して実測。' +
-    'FFT は 4 区画に 1 回跳ねるので p99 と最悪で判定)', rsVerified,
+    'test_realtime (モデム + Spectrum(8192) + Waterfall + 雑音床 を 1 区画ぶん' +
+    '通して実測。FFT は 4 区画に 1 回跳ねるので p99 と最悪で判定。' +
+    '雑音床が枠を取りこぼしていないことも同時に縛る)', rsVerified,
     '§14 Z-04, §17 CPU/Latency', '');
 
   R('RT-005', 'Audio History Bufferを保持しReplay Decodeを可能とする',
