@@ -123,6 +123,10 @@ type
     { 受信状態を初期に戻す。前の音を持ち越さない (X-06 / Z-05)。 }
     procedure Reset;
 
+    { 同調し直す。復調器の bin を決め直し、掴んでいた切れ目も捨てる ――
+      別の周波数を聞くのだから、前の切れ目に意味は無い。 }
+    procedure SetCentre(AHz: Double);
+
     { 1 シンボルぶんの音 (SymbolSepar サンプル)。ブロックが確定したら
       True を返し、OutputChar が読める。確保しない (X-04)。 }
     function Process(const ABuf: array of Double): Boolean;
@@ -136,8 +140,12 @@ type
     property SyncSnr: Double read FSyncSnr;
     { 文字を出す下限。運用では Squelch がここを動かす。 }
     property Threshold: Double read FThreshold write FThreshold;
-    { 周波数のずれ [bin]。Phase 3 の AFC がここを動かす。 }
+    { 周波数のずれ [bin]。Phase 3 の AFC がここを動かす。
+      **DecodeMargin を超える値を入れると Process で例外になる。**
+      動かす側が範囲を知れるように、その幅もここから見えるようにしてある。 }
     property FreqOffset: Integer read FFreqOffset write FFreqOffset;
+    { FreqOffset に入れてよい幅 [bin]。-DecodeMargin..+DecodeMargin。 }
+    function DecodeMargin: Integer;
 
     property Mode: TOliviaToneMode read FMode;
     property BlockMode: TOliviaMode read FBlockMode;
@@ -214,6 +222,12 @@ begin
   FHasOutput := False;
   FBlocksOut := 0;
   FSymbolsIn := 0;
+end;
+
+procedure TOliviaSync.SetCentre(AHz: Double);
+begin
+  FDemod.SetCentre(AHz);
+  Reset;
 end;
 
 function TOliviaSync.PipeSlot(APhase, AIndex: Integer): Integer;
@@ -313,6 +327,11 @@ begin
     raise EOliviaSyncError.CreateFmt('文字の位置が範囲外です (%d / 0..%d)',
       [AIndex, FBlockMode.CharsPerBlock - 1]);
   Result := FChars[AIndex];
+end;
+
+function TOliviaSync.DecodeMargin: Integer;
+begin
+  Result := FDemod.DecodeMargin;
 end;
 
 function TOliviaSync.BlocksOut: Int64;

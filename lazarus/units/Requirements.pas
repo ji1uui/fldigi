@@ -687,8 +687,9 @@ begin
   { test_replay が流しているのは **CW だけ** である。RTTY と PSK は
     あとから足したのに、この試験には足されなかった (RT-001/RT-002 と同じ形)。
     「Replay Decode を可能とする」という文面は全モデムを覆うので、
-    検証方法に **どのモデムで見たか** を書く。3 モデムぶんの決定性と
-    完全リセットは test_portfolio (MDM-008) が見ている。 }
+    検証方法に **どのモデムで見たか** を書く。全モデムぶんの決定性と
+    完全リセットは test_portfolio (MDM-008) が見ている ――
+    モデムを足したらあちらの表にも足すこと (中に注意書きを置いてある)。 }
   { RT-002 は「**全モデム**の受信ブロック」を測っている。ところが受信経路には
     モデムのほかに共有サービス (Spectrum / Waterfall) が居り、これらは
     モデムではないので RT-002 の文面に入らない。あとから足したのに
@@ -915,6 +916,11 @@ begin
     'Plugin 登録機構と同じ表を使って全モードを生成できること', rsDeferred,
     '2026-09 の品質レビュー。PLG-002 の登録機構に合わせる', 'ADR-004');
 
+  { Olivia も AFC を持たない。一定のずれに対する耐性は ±20 Hz (実測)。
+    回帰試験の Frequency drift は 0.000 だが、**これはドリフトに強い
+    という意味ではない** ―― 条件が「受信中に 0→60 Hz」なので、送信が
+    長い Olivia では本文が浴びるずれが小さくなるだけである。
+    頭出しの FreqOffset が窓口として空いている。 }
   R('MDM-006', 'PSKがAFCで周波数ドリフトに追従する',
     expCommunicate, objRobustness, fndIntelligentReceiver, [],
     False, priShould, 3,
@@ -1073,7 +1079,9 @@ begin
   R('OLV-002', 'Olivia/Contestiaの送受信が成立する',
     expCommunicate, objCompatibility, fndIntelligentReceiver,
     [fndModernComputing], False, priMust, 2,
-    'Olivia モデムの往復試験と test_regression への追加', rsProposed,
+    'test_olivia_modem (往復・区画不変性・確定位置が鎖の遅れを引いた値・' +
+    'Restartでの完全リセット・切れ目の違う二局・雑音での文字誤り率・' +
+    '送信帯域) と test_regression (10分類のTest vectorsでCER)', rsVerified,
     '§12 Phase 2 Olivia/Contestia', '');
 
   R('MDM-008', 'Phase 2の復調器をPhase 3の戦略として再利用できる',

@@ -13,7 +13,8 @@
   5. **無音でも雑音だけでも喋らない** (S/N の門)
   6. 門を下げれば喋り出す (門が効いている証拠)
   7. Contestia でも成立する
-  8. 周波数のずれは外から与えれば読める
+  8. 周波数のずれは外から与えれば読める。実際に使われる諸元をひととおり。
+      中心周波数の既定値
   9. Reset で前の音を持ち越さない
   10. 確保しない (X-04) / 同じ音から同じ結果 (Z-05)
 
@@ -559,6 +560,112 @@ begin
 end;
 
 { --------------------------------------------------------------------------
+  8b. 諸元をひととおり
+
+  要求の文面は「Olivia/Contestia」であって「Olivia 32/1000」ではない。
+  ここまでの試験は 32/1000 を中心に見てきたので、**実際に使われる諸元を
+  ひととおり**通しておく。要求の覆う範囲と試験の範囲を合わせるためで、
+  §36 §37 §40 で繰り返した轍を踏まないための試験である。
+
+  1 ブロックのシンボル数は文字あたりのビット数だけで決まるので、
+  トーン数を変えても切れ目の候補は 128 (Contestia は 64) のまま。
+  変わるのは 1 ブロックが運ぶ文字数と、シンボル長である。
+  -------------------------------------------------------------------------- }
+type
+  TVariantCase = record
+    Bits, Bw: Integer;
+    Variant_: TOliviaVariant;
+    Centre: Double;
+  end;
+
+function RunVariant(const AC: TVariantCase; out ANote: string): Boolean;
+var
+  m: TOliviaToneMode;
+  bm: TOliviaMode;
+  w: TDArr;
+  got: string;
+  msgStart, phase: Integer;
+  snr: Double;
+  blocks: Int64;
+begin
+  m.Variant_ := AC.Variant_;
+  m.BitsPerSymbol := AC.Bits;
+  m.BandwidthHz := AC.Bw;
+  m.SampleRate := 8000;
+  bm := m.BlockMode;
+  w := MakeAudio(m, MSG, 7, 0, 1, msgStart, AC.Centre);
+  got := Receive(m, w, phase, snr, blocks, 0, -1, nil, AC.Centre);
+  Result := Pos(MSG, got) > 0;
+  ANote := Format('SymLen %4d / %.3f baud / 1ブロック %d 文字 / 切れ目 %3d / S/N %5.2f',
+    [m.SymbolLen, m.BaudRate, bm.CharsPerBlock,
+     OLIVIA_SLICES * bm.SymbolsPerBlock, snr]);
+  if not Result then ANote := ANote + '  [' + got + ']';
+end;
+
+procedure TestStandardVariants;
+var
+  cases: array[0..8] of TVariantCase = (
+    (Bits: 2; Bw:  125; Variant_: ovOlivia;    Centre: 1000),
+    (Bits: 3; Bw:  250; Variant_: ovOlivia;    Centre: 1000),
+    (Bits: 3; Bw:  500; Variant_: ovOlivia;    Centre: 1000),
+    (Bits: 4; Bw:  500; Variant_: ovOlivia;    Centre: 1000),
+    (Bits: 4; Bw: 1000; Variant_: ovOlivia;    Centre: 1500),
+    (Bits: 5; Bw:  500; Variant_: ovOlivia;    Centre: 1000),
+    (Bits: 5; Bw: 1000; Variant_: ovOlivia;    Centre: 1000),
+    (Bits: 6; Bw: 2000; Variant_: ovOlivia;    Centre: 1500),
+    (Bits: 5; Bw: 1000; Variant_: ovContestia; Centre: 1000));
+  i, bad: Integer;
+  note: string;
+begin
+  WriteLn;
+  WriteLn('--- 8b. 実際に使われる諸元をひととおり ---');
+  bad := 0;
+  for i := 0 to High(cases) do
+  begin
+    if not RunVariant(cases[i], note) then Inc(bad);
+    WriteLn(Format('          %s %3d/%-4d  %s  %s',
+      [BoolToStr(cases[i].Variant_ = ovContestia, 'C', 'O'),
+       1 shl cases[i].Bits, cases[i].Bw,
+       BoolToStr(Pos('[', note) = 0, '出た', '出ない'), note]));
+  end;
+  CheckEqI(bad, 0,
+    Format('**%d 通りの諸元すべてで本文が出る** (Olivia 4..64 トーン / Contestia)',
+      [Length(cases)]));
+end;
+
+{ --------------------------------------------------------------------------
+  8c. 中心周波数を指定しなかったとき
+
+  既定値は黙って効く。試験から呼ばれていないと、変えたことに誰も
+  気づかない ―― 実際、説明できない式が既定になっていた。
+  -------------------------------------------------------------------------- }
+procedure TestDefaultCentre;
+var
+  m: TOliviaToneMode;
+  mo: TOliviaModulator;
+  de: TOliviaDemodulator;
+  sy: TOliviaSync;
+begin
+  WriteLn;
+  WriteLn('--- 8c. 中心周波数の既定値 ---');
+  m := OLIVIA_32_1000;
+  mo := TOliviaModulator.Create(m);
+  de := TOliviaDemodulator.Create(m);
+  sy := TOliviaSync.Create(m);
+  try
+    WriteLn(Format('        既定 %.1f Hz / 送信の bin %d / 受信の bin %d / 探索幅 ±%d bin',
+      [mo.CentreHz, mo.FirstCarrier, de.FirstCarrier, sy.DecodeMargin]));
+    Check(mo.CentreHz = OLIVIA_DEFAULT_CENTRE_HZ,
+      Format('既定の中心周波数は %.0f Hz', [OLIVIA_DEFAULT_CENTRE_HZ]));
+    CheckEqI(mo.FirstCarrier, de.FirstCarrier, '送受で同じ bin に置く');
+    CheckEqI(mo.FirstCarrier, 33, 'Olivia 32/1000 の既定では bin 33');
+    Check(sy.DecodeMargin > 0, '周波数のずれを探せる幅がある');
+  finally
+    mo.Free; de.Free; sy.Free;
+  end;
+end;
+
+{ --------------------------------------------------------------------------
   9-10. Reset / 確保しない / 決定性
   -------------------------------------------------------------------------- }
 var
@@ -673,6 +780,8 @@ begin
   TestSquelch;
   TestContestia;
   TestFrequencyOffset;
+  TestStandardVariants;
+  TestDefaultCentre;
   TestResetAndDeterminism;
 
   if FailCount = 0 then

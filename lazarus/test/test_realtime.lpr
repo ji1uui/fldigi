@@ -33,6 +33,7 @@ uses
   SoundIntf, ModemTypes, Modem, ModemDSP, DecodeEvidence,
   SpectrumService, WaterfallModel,
   RttyModemImpl, CwModemImpl, PskModemImpl, MfskModemImpl, MfskTones,
+  OliviaModemImpl,
   TestSupport, Requirements;
 
 const
@@ -478,6 +479,7 @@ var
   cw: TCwModem;
   psk: TPskModem;
   mfsk: TMfskModem;
+  olv: TOliviaModem;
 begin
   snd := TCaptureSoundDevice.Create;
   rx := TRttyModem.Create(snd);
@@ -514,6 +516,13 @@ begin
     MeasureRxDeadline('MFSK16', mfsk, MFSK16_MODE.CentreFreqHz);
   finally
     mfsk.Free;
+  end;
+
+  olv := TOliviaModem.Create(snd, mmOlivia, 5, 1000);
+  try
+    MeasureRxDeadline('Olivia32/1000', olv, olv.Frequency);
+  finally
+    olv.Free;
     snd.Free;
   end;
 end;

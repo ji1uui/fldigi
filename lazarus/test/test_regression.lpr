@@ -50,7 +50,8 @@ uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   Classes, SysUtils, Math, DateUtils,
   SoundIntf, ModemTypes, Modem, ModemDSP,
-  CwModemImpl, RttyModemImpl, PskModemImpl, MfskModemImpl, MfskTones, DecodeEvidence,
+  CwModemImpl, RttyModemImpl, PskModemImpl, MfskModemImpl, MfskTones,
+  OliviaModemImpl, DecodeEvidence,
   TestVectors, ErrorRate, WaveFile, TestSupport, Requirements;
 
 var
@@ -776,6 +777,12 @@ begin
   Result.Frequency := 1000;
 end;
 
+function MakeOlivia(ASound: TCustomSoundDevice): TCustomModem;
+begin
+  { Olivia 32/1000。中心 1000 Hz は上流の待ち受けと同じ。 }
+  Result := TOliviaModem.Create(ASound, mmOlivia, 5, 1000);
+end;
+
 function MakeMfsk16(ASound: TCustomSoundDevice): TCustomModem;
 begin
   Result := TMfskModem.Create(ASound, mmMFSK16);
@@ -802,7 +809,7 @@ type
   end;
 
 var
-  GModes: array[0..4] of TModeSpec;
+  GModes: array[0..5] of TModeSpec;
 
 { 無音のときに出してよい文字数の上限。実測 (CW 0.0 / RTTY 14.3 /
   PSK31 31.0 / PSK63 39.1) のおよそ 2 倍。
@@ -818,8 +825,10 @@ begin
     1: Result := 35;    { RTTY45 実測 14.3 }
     2: Result := 70;    { PSK31  実測 31.0 }
     3: Result := 90;    { PSK63  実測 39.1 }
-  else Result := 80;    { MFSK16 実測 35.3。誤り訂正が雑音からも文字を
+    4: Result := 80;    { MFSK16 実測 35.3。誤り訂正が雑音からも文字を
                           組み立てるので、CW/RTTY より多く喋る。 }
+  else Result := 20;    { Olivia 実測は下の表を参照。S/N の門があるので
+                          雑音ではほとんど喋らない。 }
   end;
 end;
 
@@ -837,7 +846,16 @@ begin
       { PSK と MFSK は AFC を持たないので 60 Hz のドリフトに追従できない。
         MFSK16 はトーン間隔が 15.625 Hz しかないので、60 Hz は
         トーン 4 本ぶんに当たる ―― 同期は追えても周波数は追えない。
-        既知の限界として扱う (MDM-006 / Phase 3)。 }
+        既知の限界として扱う (MDM-006 / Phase 3)。
+
+        **Olivia の 0.000 を「ドリフトに強い」と読んではいけない。**
+        この条件は「受信中に 0 Hz から 60 Hz までずれる」ので、
+        送信が長いモードほどずれる速さが遅くなる。Olivia の送信は
+        前置きと押し出しで 27 秒あり、本文はその前半に入る ――
+        つまり本文が浴びるずれは 60 Hz よりずっと小さい。
+        **一定のずれに対する本当の耐性は ±20 Hz** で、
+        test_olivia_modem が別に測っている。
+        この条件は送信長が違うモードどうしでは比べられない。 }
       if AModeIdx >= 2 then Result := -1;
   end;
 end;
@@ -989,6 +1007,8 @@ begin
   GModes[3].Name := 'PSK63';  GModes[3].Make := @MakePsk63; GModes[3].Carrier := 1000;
   GModes[4].Name := 'MFSK16'; GModes[4].Make := @MakeMfsk16;
   GModes[4].Carrier := MFSK16_MODE.CentreFreqHz;
+  GModes[5].Name := 'Olivia'; GModes[5].Make := @MakeOlivia;
+  GModes[5].Carrier := 1000;
 
   TestBuildFlags;
   TestLevenshtein;

@@ -75,6 +75,12 @@ uses
   SysUtils, Math, ModemTypes, ModemDSP, OliviaBlock;
 
 const
+  { 既定の中心周波数 [Hz]。上流 fldigi の待ち受けと同じ値である。
+    もとは占有幅から作った式を置いていたが、**何を意図した値なのかを
+    説明できなかった**。試験からも呼ばれておらず、説明できないものが
+    黙って効く状態だったので、値を決め打ちにして試験を付けた。 }
+  OLIVIA_DEFAULT_CENTRE_HZ = 1000.0;
+
   { トーンを置く bin の間隔。持ち上がり窓の主葉が 2 bin ぶんあるので
     詰められない (上流: CarrierSepar)。 }
   OLIVIA_CARRIER_SEPAR = 2;
@@ -148,6 +154,10 @@ type
   public
     constructor Create(const AMode: TOliviaToneMode; ACentreHz: Double = 0);
     procedure Reset;
+    { 同調し直す。トーンの置き場所 (bin) を計算し直して状態を戻す。
+      収まらない周波数なら例外にする ―― 黙って別の bin に出すより、
+      出せないと言うほうがよい。 }
+    procedure SetCentre(AHz: Double);
     { シンボル値 (0..Tones-1) を送る。ABuf に SymbolSepar サンプル返す。
       確保しない (X-04)。 }
     procedure Send(ASymbol: Integer; var ABuf: array of Double);
@@ -188,6 +198,8 @@ type
   public
     constructor Create(const AMode: TOliviaToneMode; ACentreHz: Double = 0);
     procedure Reset;
+    { 同調し直す。読む bin と探索の余裕を決め直して状態を戻す。 }
+    procedure SetCentre(AHz: Double);
     { SymbolSepar サンプル入れる。確保しない (X-04)。 }
     procedure Process(const ABuf: array of Double);
 
@@ -328,7 +340,7 @@ begin
   FWrapMask := FLen - 1;
 
   if ACentreHz > 0 then FCentreHz := ACentreHz
-  else FCentreHz := AMode.OccupiedBandwidthHz / 2 + AMode.ToneSpacingHz * 16;
+  else FCentreHz := OLIVIA_DEFAULT_CENTRE_HZ;
   FFirstCarrier := FirstCarrierFor(AMode, FCentreHz);
   { 送信に要るのは「トーンが spectrum に収まる」ことだけである。
     受信側の探索の余裕まで要求すると、低い周波数に置けなくなる。 }
@@ -338,6 +350,20 @@ begin
   for i := 0 to FLen - 1 do
     FCos[i] := Cos(2 * Pi * i / FLen);
   SetLength(FTap, FLen);
+  Reset;
+end;
+
+procedure TOliviaModulator.SetCentre(AHz: Double);
+var
+  bin: Integer;
+begin
+  if AHz <= 0 then AHz := OLIVIA_DEFAULT_CENTRE_HZ;
+  bin := FirstCarrierFor(FMode, AHz);
+  CheckCarrierFits(FMode, bin, 0);
+  FCentreHz := AHz;
+  FFirstCarrier := bin;
+  { 重ね合わせの環には古い同調の音が残っている。持ち越すと
+    つなぎ目で別の周波数が混ざるので捨てる。 }
   Reset;
 end;
 
@@ -450,7 +476,7 @@ begin
   FWrapMask := FLen - 1;
 
   if ACentreHz > 0 then FCentreHz := ACentreHz
-  else FCentreHz := AMode.OccupiedBandwidthHz / 2 + AMode.ToneSpacingHz * 16;
+  else FCentreHz := OLIVIA_DEFAULT_CENTRE_HZ;
   FFirstCarrier := FirstCarrierFor(AMode, FCentreHz);
   CheckCarrierFits(AMode, FFirstCarrier, 0);
   { 探索の余裕は、spectrum の端に当たったぶんだけ削る。
@@ -478,6 +504,32 @@ begin
   SetLength(FSpec0, FLen div 2);
   SetLength(FSpec1, FLen div 2);
   SetLength(FEnergy, OLIVIA_SLICES * FWidth);
+  Reset;
+end;
+
+procedure TOliviaDemodulator.SetCentre(AHz: Double);
+var
+  bin, last, margin: Integer;
+begin
+  if AHz <= 0 then AHz := OLIVIA_DEFAULT_CENTRE_HZ;
+  bin := FirstCarrierFor(FMode, AHz);
+  CheckCarrierFits(FMode, bin, 0);
+
+  margin := OLIVIA_DECODE_MARGIN;
+  if margin > bin then margin := bin;
+  last := bin + OLIVIA_CARRIER_SEPAR * (FMode.Tones - 1);
+  if last + margin >= FMode.SymbolLen div 2 then
+    margin := FMode.SymbolLen div 2 - 1 - last;
+  if margin < 0 then margin := 0;
+
+  FCentreHz := AHz;
+  FFirstCarrier := bin;
+  FMargin := margin;
+  { 読む幅が変わるので置き場も取り直す。同調のし直しは運用上まれな
+    ので、ここで確保が起きても deadline の話にはならない。 }
+  FWidth := OLIVIA_CARRIER_SEPAR * (FMode.Tones - 1) + 1 + 2 * FMargin;
+  SetLength(FEnergy, OLIVIA_SLICES * FWidth);
+  { 遅延線には古い同調の音が残っている。持ち越さない。 }
   Reset;
 end;
 

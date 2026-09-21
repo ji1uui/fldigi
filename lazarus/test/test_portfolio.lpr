@@ -34,7 +34,7 @@ uses
   {$IFDEF UNIX} cthreads, {$ENDIF}
   SysUtils, Math,
   SoundIntf, ModemTypes, Modem, ModemEngine, DecodeEvidence, ErrorRate,
-  CwModemImpl, RttyModemImpl, PskModemImpl, MfskModemImpl, MfskTones, TestSupport, Requirements;
+  CwModemImpl, RttyModemImpl, PskModemImpl, MfskModemImpl, MfskTones, OliviaModemImpl, TestSupport, Requirements;
 
 var
   FailCount: Integer = 0;
@@ -132,6 +132,7 @@ procedure TSink.Decode(Sender: TCustomModem; const AEvidence: TDecodeEvidence);
 var
   n: Integer;
   m: Double;
+  want: Int64;
 begin
   if AEvidence.BestChar > 0 then
     FText := FText + Chr(AEvidence.BestChar);
@@ -140,7 +141,13 @@ begin
   else if System.Pos('[' + AEvidence.DecoderName + ']', FNames) = 0 then
     FNames := FNames + '[' + AEvidence.DecoderName + ']';
   if AEvidence.SamplePos < 0 then Inc(FMissingPos);
-  if AEvidence.SamplePos <> FBlockStart then Inc(FNotBlockStart);
+  { 名乗るべき位置は「いま流している区画の先頭 - その復調器の鎖の遅れ」。
+    遅れ 0 のモードでは区画の先頭そのものになる。Olivia のように管を
+    持つモードは遅れを引いた値を名乗る ―― どちらも「その結果を生んだ音」
+    を指す、という一つの規則である。流し始めの数区画は 0 で止まる。 }
+  want := FBlockStart - Sender.PipelineDelaySamples;
+  if want < 0 then want := 0;
+  if AEvidence.SamplePos <> want then Inc(FNotBlockStart);
   n := Length(FPos);
   SetLength(FPos, n + 1);
   FPos[n] := AEvidence.SamplePos;
@@ -191,6 +198,11 @@ function MakeMfsk(ASound: TCustomSoundDevice): TCustomModem;
 begin
   Result := TMfskModem.Create(ASound, mmMFSK16);
   Result.Frequency := MFSK16_MODE.CentreFreqHz;
+end;
+
+function MakeOlivia(ASound: TCustomSoundDevice): TCustomModem;
+begin
+  Result := TOliviaModem.Create(ASound, mmOlivia, 5, 1000);
 end;
 
 { 送信して波形を得る。前後に無音を付ける。 }
@@ -304,12 +316,38 @@ const
     Phase 3 の戦略として再利用できる」であって、一部ではない。
     モードを足したらここにも足す ―― 足し忘れると、要求の文面だけが
     広くて中身が追いついていない状態になる (README 40 章の轍)。 }
-  MODEM_COUNT = 4;
+  MODEM_COUNT = 5;
 
 var
   GMake: array[0..MODEM_COUNT - 1] of TMakeModem;
   GName: array[0..MODEM_COUNT - 1] of string;
   GWave: array[0..MODEM_COUNT - 1] of TDoubleArray;
+  { 各復調器が申告する鎖の遅れ [サンプル]。表に出しておくと、
+    遅れのあるモードを足したときに表示でそれと分かる。 }
+  GDelay: array[0..MODEM_COUNT - 1] of Int64;
+
+{ 各復調器の鎖の遅れを拾っておく。表示と、位置の突き合わせの説明に使う。 }
+procedure CollectDelays;
+var
+  i: Integer;
+  snd: TCaptureSoundDevice;
+  m: TCustomModem;
+begin
+  snd := TCaptureSoundDevice.Create;
+  try
+    for i := 0 to MODEM_COUNT - 1 do
+    begin
+      m := GMake[i](snd);
+      try
+        GDelay[i] := m.PipelineDelaySamples;
+      finally
+        m.Free;
+      end;
+    end;
+  finally
+    snd.Free;
+  end;
+end;
 
 { --------------------------------------------------------------------------
   1. 前提: すべての復調器がそれぞれ自分の音を復号できる
@@ -593,8 +631,9 @@ begin
       Receive(GMake[i], GWave[i], MODEM_BLOCK_SIZE, s);
       Check(s.Count > 0, Format('前提: %s が結果を出した', [GName[i]]));
       CheckEqI(s.NotBlockStart, 0,
-        Format('**%s: すべての結果が「いま流している区画の先頭」を名乗る**',
-          [GName[i]]));
+        Format('**%s: すべての結果が「その結果を生んだ音」を名乗る** ' +
+          '(区画の先頭 - 鎖の遅れ %d)',
+          [GName[i], GDelay[i]]));
     finally
       s.Free;
     end;
@@ -672,7 +711,9 @@ begin
   GMake[1] := @MakeRtty; GName[1] := 'RTTY';
   GMake[2] := @MakePsk;  GName[2] := 'PSK31';
   GMake[3] := @MakeMfsk; GName[3] := 'MFSK16';
+  GMake[4] := @MakeOlivia; GName[4] := 'Olivia';
 
+  CollectDelays;
   TestBaseline;
   TestDeterminismAndReset;
   TestBlockSizeInvariance;

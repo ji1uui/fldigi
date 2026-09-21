@@ -300,6 +300,20 @@ type
       集計・表示・記録する必要があるため (Z-01 Observability)。 }
     function DecoderName: string; virtual;
 
+    { この復調器が音を受け取ってから結果を確定するまでの**鎖の遅れ**
+      [サンプル]。既定は 0 で、CW / RTTY / PSK / MFSK のように
+      「確定した区画がそのまま原因の区画」であるモードは触らない。
+
+      Olivia のように内部に管を持つモードは、確定が原因の音より
+      何秒も後になる。そのまま「確定したときの区画」を名乗ると、
+      そこから流し直しても同じ結果は出てこない ―― SamplePos が
+      避けたかったことそのものである。そこで遅れを引いた位置を
+      名乗り、引いた量をここで申告する。
+
+      配る側 (Phase 3 の Algorithm Portfolio) は
+      「区画の先頭 - PipelineDelaySamples」で突き合わせられる。 }
+    function PipelineDelaySamples: Int64; virtual;
+
     property OnDecode: TDecodeEvent read FOnDecode write FOnDecode;
     property OnEchoChar: TEchoCharEvent read FOnEchoChar write FOnEchoChar;
     property OnFrequencyChanged: TFrequencyEvent read FOnFrequencyChanged write FOnFrequencyChanged;
@@ -466,6 +480,11 @@ end;
 procedure TCustomModem.EmitRxChar(ACh: Integer);
 begin
   EmitDecode(SingleCandidateEvidence(ACh, DecoderName));
+end;
+
+function TCustomModem.PipelineDelaySamples: Int64;
+begin
+  Result := 0;
 end;
 
 function TCustomModem.DecoderName: string;
