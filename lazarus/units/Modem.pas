@@ -172,6 +172,9 @@ type
     procedure TrackFreq(AFreq: Double);
     { 指令された周波数へ戻す。各モデムの Restart から呼ぶ。 }
     procedure RestoreCommandedFreq;
+    { 使う側が指令した周波数。自動追尾では動かない。
+      AFC は「指令からどれだけずれたか」を持つので、この値が要る。 }
+    property CommandedFrequency: Double read FCommandedFreq;
 
     { 派生クラスから復調結果を上位へ渡す唯一の経路。
       fldigi: put_rx_char(c) に相当するが、運ぶのは文字ではなく Evidence。 }

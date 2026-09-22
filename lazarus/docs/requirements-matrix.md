@@ -13,7 +13,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 出典が `§18` の行は Baseline の表にそのまま載っているもの、
 それ以外は Baseline 本文からこのプロジェクトで起こしたもの。
 
-要求 71 件 (検証済 54 / 実装済 1 / 方針決定 3 / 起案 6 / 後送り 7)
+要求 71 件 (検証済 55 / 実装済 1 / 方針決定 3 / 起案 6 / 後送り 6)
 
 ## Phase 0
 
@@ -92,7 +92,7 @@ Verification / Status。Primary Foundation は 1 つに限る。
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | RTTY-021 | QSB時に複数復調戦略を比較 | Communicate | C | Y | X/Z | No | Must | Golden WAV BER/CER | 起案 |  | §18 | ADR-002 |
 | SPC-002 | 雑音推定を共有サービス化し全戦略が同じ雑音床を見る | Communicate | B | Y | X | No | Must | test_noise (白色雑音の密度が理論値 2*sigma^2/Fs に載ること: 分位点4種・FFT長3種・窓3種/強い信号8本でも動かないこと (平均との対比)/帯域S/Nの追随/取りこぼしと流し直しの申告/ならし/確保しない) | 検証済 | ✓ | §4 X-05, §12 Phase 3 Noise Estimator |  |
-| MDM-006 | PSKがAFCで周波数ドリフトに追従する | Communicate | B | Y | - | No | Should | test_regression (Frequency drift の上限を既知の限界から引き下げる) | 後送り |  | Baseline Phase 3 Adaptive Receiver の AFC。実測: 60Hz ドリフトで PSK31/63 は本文CER 0.79/0.86、CW と RTTY(AFC) は 0.00 |  |
+| MDM-006 | PSKがAFCで周波数ドリフトに追従する | Communicate | B | Y | - | No | Should | test_afc (TFreqTracker の単体試験 + PSK31/63 の引き込み・ドリフト追随・雑音での酔歩防止・Restart での破棄・Evidence 反映、全 56 件) / test_regression (既知の限界の条件で PSK63 が改善し PSK31 が悪化しないこと) | 検証済 | ✓ | 記号間の位相差から測る判別器で、捕捉範囲は sc_bw/4 (記号速度の 1/4) で頭打ちになる ―― PSK31 で 7.8 Hz、PSK63 で 15.6 Hz (実測、静的なずれで検証: 6 Hz まではそもそも AFC が無くても読め、7/14 Hz が AFC の有無で結果が分かれる唯一の帯、8/15 Hz 以上は両方とも復号が壊れる)。ロック後の緩いドリフトはこの範囲内なら際限なく追随できる (30 Hz/8.7 秒 = 3.4 Hz/秒までは実測で追随)。既知の限界の条件 (test_regression、0->60Hz/約 8 秒) では PSK63 が本文CER 0.79 前後→0.10 前後 (3 乱数種平均)まで改善するが、PSK31 は sc_bw/4 を大きく超えるため 0.79 のまま変わらない (これは実装の不備ではなく判別方式そのものの限界。RTTY の周波数領域探索のような別方式が要る)。品質の門 (afcmetric>=0.05) で、雑音だけの区間では補正 0 回のまま酔歩しない (実測: 5 秒の雑音、速い設定で確認)。 |  |
 
 ## Phase 4
 

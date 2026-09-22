@@ -949,10 +949,21 @@ begin
   R('MDM-006', 'PSKがAFCで周波数ドリフトに追従する',
     expCommunicate, objRobustness, fndIntelligentReceiver, [],
     False, priShould, 3,
-    'test_regression (Frequency drift の上限を既知の限界から引き下げる)',
-    rsDeferred,
-    'Baseline Phase 3 Adaptive Receiver の AFC。実測: 60Hz ドリフトで ' +
-    'PSK31/63 は本文CER 0.79/0.86、CW と RTTY(AFC) は 0.00', '');
+    'test_afc (TFreqTracker の単体試験 + PSK31/63 の引き込み・ドリフト追随・' +
+    '雑音での酔歩防止・Restart での破棄・Evidence 反映、全 56 件) / ' +
+    'test_regression (既知の限界の条件で PSK63 が改善し PSK31 が悪化しないこと)',
+    rsVerified,
+    '記号間の位相差から測る判別器で、捕捉範囲は sc_bw/4 (記号速度の 1/4) ' +
+    'で頭打ちになる ―― PSK31 で 7.8 Hz、PSK63 で 15.6 Hz (実測、静的な' +
+    'ずれで検証: 6 Hz まではそもそも AFC が無くても読め、7/14 Hz が AFC の' +
+    '有無で結果が分かれる唯一の帯、8/15 Hz 以上は両方とも復号が壊れる)。' +
+    'ロック後の緩いドリフトはこの範囲内なら際限なく追随できる (30 Hz/8.7 秒 ' +
+    '= 3.4 Hz/秒までは実測で追随)。既知の限界の条件 (test_regression、' +
+    '0->60Hz/約 8 秒) では PSK63 が本文CER 0.79 前後→0.10 前後 (3 乱数種平均)' +
+    'まで改善するが、PSK31 は sc_bw/4 を大きく超えるため 0.79 のまま変わらない' +
+    ' (これは実装の不備ではなく判別方式そのものの限界。RTTY の周波数領域探索の' +
+    'ような別方式が要る)。品質の門 (afcmetric>=0.05) で、雑音だけの区間では' +
+    '補正 0 回のまま酔歩しない (実測: 5 秒の雑音、速い設定で確認)。', '');
 
   { Baseline §12 の Phase 2 完了条件
       「Phase 2 Decoder は Phase 3 の Normal 戦略として再利用可能であること」

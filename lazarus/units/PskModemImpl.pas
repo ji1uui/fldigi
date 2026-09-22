@@ -55,7 +55,60 @@
   - QPSK / PSKR (FEC 付き) / 8PSK / 16PSK。畳み込み符号と Viterbi 復号が
     要る。Baseline の Phase 2 が求めているのは PSK31/63 なので、
     ここでは BPSK に絞った。
-  - 複数搬送波 (PSK125R 系)、AFC、IMD 測定、PSK ブラウザ。
+  - 複数搬送波 (PSK125R 系)、IMD 測定、PSK ブラウザ。
+
+  AFC (MDM-006)
+  ----------------------------------------------------------------------------
+  記号間の位相差から周波数誤差を測る。判定した位相 (0 か Pi) からのずれが
+  そのまま「1 記号のあいだに余計に回った角度」なので、標本化速度と記号長で
+  割れば Hz になる。効かせ方は `FreqTracker` に預ける。
+
+  **fldigi と違うところが 1 つある。** あちらは
+
+      error = phase - bits * M_PI / 2;
+      if (error < -M_PI/2 || error > M_PI/2) return;
+
+  と書く。phase は [0, 2*Pi) に畳んであるので、位相が変わらない記号
+  (bits = 0) で誤差がわずかに負のとき phase は 2*Pi - e となり、
+  error = 2*Pi - e が門に掛かって **捨てられる**。同じ記号で誤差が正なら
+  通る。つまり bits = 0 の測定は片側しか採らない。
+
+  これは単に測定を減らすだけではない。誤差がゼロでも、雑音で正に振れた
+  ぶんだけが採られるので、**周波数が下へ引かれ続ける**。
+  ここでは誤差を (-Pi, Pi] へ畳んでから使う。畳めば判定の規則そのものが
+  誤差を [-Pi/2, Pi/2) に閉じ込めるので、fldigi の門は不要になる
+  (門の残り半分 `fabs(error) < sc_bw` も、測れる上限が sc_bw/4 なので
+  最初から当たらない)。
+
+  「ずれが無いときに動かない」ことは試験で見る。畳みを外すと落ちる。
+
+  捕捉範囲は sc_bw/4 で頭打ちになる (実測)
+  ----------------------------------------------------------------------------
+  1 記号で測れる誤差の上限は、位相の折り返しの都合で sc_bw/4 = 記号速度/4
+  である (PSK31 で 7.8 Hz、PSK63 で 15.6 Hz)。**これは追尾を速くしても
+  超えられない** ―― 大きく外れた静的な周波数差 (0 サンプル目から一定) は、
+  AFC の有無にかかわらずそこで復号そのものが壊れる。実測 (PSK31、無雑音):
+
+      静的なずれ    AFC 無し        AFC 有り
+      6 Hz         CER 0.000       CER 0.000  (AFC は要らない)
+      7 Hz         CER 0.643       CER 0.000  (**AFC が肩代わりする** 唯一の帯)
+      8 Hz 以上     CER 0.857      CER 0.857  (両方とも壊れる。同じ文字化け)
+
+  AFC が効くのは「復号はぎりぎり保てるが、そのままでは少しずつ外れて壊れる」
+  という狭い帯だけである。8 Hz を境に、復号自体が最初の記号から壊れるので
+  AFC には誤差を測る材料が無い。PSK63 でも同じ形で境目が 14→15 Hz に伸びる
+  (境目は sc_bw/4 に比例する)。
+
+  一方、**ロックした状態からのゆっくりしたドリフトには強い** ―― 瞬間ごとの
+  変化が sc_bw/4 の中に収まっていれば、頭出しの静的なずれとは別の問題になる。
+  実測では 7.86 秒で 40 Hz (5.1 Hz/秒) までは本文が割れずに読めたが、
+  50 Hz (6.4 Hz/秒) で読めなくなった。この 60 Hz ドリフト条件
+  (test_regression / test_vectors の vkFrequencyDrift、7.6 Hz/秒) は
+  この上限のすぐ外側にあり、**AFC を入れても入れなくても CER は変わらない
+  (実測 0.786)** ―― PSK に AFC が無いからではなく、位相差判別器という
+  方式そのものの捕捉限界である。RTTY のように周波数領域で探す AFC を
+  持たない fldigi の PSK と同じ制約なので、既知の限界として扱う
+  (test_regression.lpr の CeilingFor を参照)。
   ============================================================================ }
 unit PskModemImpl;
 
@@ -65,7 +118,7 @@ interface
 
 uses
   Classes, SysUtils, Math, SoundIntf, ModemTypes, Modem, ModemDSP,
-  PskVaricode, DecodeEvidence;
+  PskVaricode, DecodeEvidence, FreqTracker;
 
 const
   PSK_SAMPLE_RATE = 8000;        // fldigi: samplerate = 8000
@@ -78,6 +131,47 @@ const
   PSK_PREAMBLE_SYMBOLS = 32;
   PSK_POSTAMBLE_SYMBOLS = 32;
 
+  { AFC が指令周波数から離れてよい上限 [Hz] (両側)。
+
+    PSK31 の占有幅は 31 Hz なので、100 Hz は隣の隣まで離れる量である。
+    追尾に要るぶんは十分あり、乗り移りは防げる。送信周波数も一緒に動く
+    (周波数ロックが無ければ) ので、これは **送信が指令からどこまで
+    離れうるかの上限**でもある。 }
+  PSK_AFC_RANGE_HZ = 100.0;
+
+  { 追尾を許す品質の下限。fldigi: if (afcmetric < 0.05) return。
+    品質は位相差が 0 か Pi に揃っている度合い (|quality|^2) で、
+    雑音だけなら 0 に近い。**これが無いと雑音だけの区間でも周波数が
+    酔歩する。** DCD は Squelch の既定 (0 = スケルチなし) では
+    ほぼ立ちっぱなしになるので、DCD だけでは止められない。
+
+    実測 (速い設定、5 秒の雑音のみ、Z-05 のため乱数種固定):
+    この門を外すと 155 回補正がかかり −12.8 Hz 動く。門があれば
+    品質が一度も 0.05 に届かず、補正 0 回・0.0000 Hz のまま
+    (test_afc の TestNoiseNoWander)。
+
+    **この門はただの安全装置ではなく、捕捉範囲とのぶつかり合いでもある。**
+    門を外すと、PSK31 は既知の限界の条件 (60 Hz ドリフト、sc_bw/4 を
+    大きく超える) でもこの特定の試行では読めてしまう (CER 0.786→0.000)。
+    品質の低い測定まで拾うことで捕捉範囲の外にも手が伸びる、ということ
+    だが、その代償が上の雑音の酔歩である。つまり「門を緩めれば捕捉範囲が
+    広がる」は事実だが、雑音免疫と引き換えになる ―― ここでは雑音免疫を
+    優先した (無信号時に周波数が動くほうが実害が大きい)。将来もっと
+    広い捕捉範囲が要るなら、品質の門を緩めるのではなく、RTTY のような
+    周波数領域の探索を別の手段として足すべきである。 }
+  PSK_AFC_MIN_QUALITY = 0.05;
+
+  { 追尾の速さ。0 = 遅い / 1 = ふつう / 2 = 速い。
+    利得は 1 / (dcdbits / 2^speed) で、時定数はおよそ
+    1.024 / 2^speed 秒になる (dcdbits / 記号速度 がどのモードでも 1.024 秒)。 }
+  { その品質のならし段数。fldigi: decayavg(afcmetric, norm(quality), 50) }
+  PSK_AFC_METRIC_DECAY = 50;
+
+  PSK_AFC_SPEED_SLOW = 0;
+  PSK_AFC_SPEED_MEDIUM = 1;
+  PSK_AFC_SPEED_FAST = 2;
+  PSK_AFC_DEFAULT_SPEED = PSK_AFC_SPEED_MEDIUM;
+
 type
   EPskModemError = class(Exception);
 
@@ -88,9 +182,10 @@ type
   private
     // --- 諸元 (モードで決まる) ---
     FSymbolLen: Integer;         // fldigi: symbollen (1 記号のサンプル数)
-    { fldigi: dcdbits。あちらでは AFC と位相品質の表示に使う。どちらも
-      未実装なので今は読まないが、モードごとの諸元として持っておく
-      (AFC を足すときにこの値が要る)。 }
+    { fldigi: dcdbits。DCD の窓であると同時に **AFC の利得の逆数** でもある
+      (あちらは freqerr = error / dcdbits)。モードごとに 32 / 64 / 128 で、
+      記号速度 31.25 / 62.5 / 125 ボーに対して dcdbits / 記号速度 は
+      どれも 1.024 秒になる ―― 値の本体は「約 1 秒の時定数」である。 }
     FDcdBits: Integer;
     FUseCoreFilter: Boolean;     // fldigi: fir_type == PSK_CORE
 
@@ -102,9 +197,7 @@ type
     FShreg: LongWord;            // fldigi: shreg (varicode 組み立て)
     FBitClk: Double;             // fldigi: bitclk
     FSyncBuf: array[0..PSK_SYNC_BUCKETS-1] of Double;  // fldigi: syncbuf[16]
-    { fldigi: phase。直前の記号との位相差。フィールドに持っているのは
-      fldigi が AFC からも読むためで、こちらは今 RxSymbol の中だけで
-      使う。AFC を足すときにそのまま使える。 }
+    { fldigi: phase。直前の記号との位相差。AFC もここから誤差を作る。 }
     FPhase: Double;
     FBits: Integer;              // fldigi: bits (0 または 2)
     FDcdShreg: LongWord;         // fldigi: dcdshreg
@@ -112,6 +205,12 @@ type
     FDcdOffCounter: Integer;     // fldigi: dcdOFFcounter
     FQuality: TComplex;          // fldigi: quality
     FAverageAmp: Double;         // fldigi: averageamp
+
+    // --- AFC (MDM-006) ---
+    FAfc: TFreqTracker;
+    FAfcOn: Boolean;
+    FAfcSpeed: Integer;
+    FAfcMetric: Double;          // fldigi: afcmetric
 
     // --- Evidence 用 (ADR-002) ---
     FCharMinMargin: Double;      // 文字を構成したビットの最小余裕
@@ -132,6 +231,11 @@ type
     procedure TxSymbolBits(ABit: Integer);
     procedure TxSendSymbol(ASym: Integer);
     procedure TxSendChar(ACh: Byte);
+    procedure Afc;
+    procedure SetAfcSpeed(AValue: Integer);
+    function GetAfcOffset: Double;
+    function GetAfcClamps: Int64;
+    function GetAfcUpdates: Int64;
   public
     constructor Create(ASound: TCustomSoundDevice; AMode: TModemMode); reintroduce;
     destructor Destroy; override;
@@ -146,6 +250,26 @@ type
     property SymbolLen: Integer read FSymbolLen;
     { 搬送波を捕まえているか。fldigi: dcd }
     property Dcd: Boolean read FDcd;
+
+    { --- AFC (MDM-006) ---
+      切っても、それまでに動いた周波数はそこに留まる (RTTY と同じ分担)。
+      指令された周波数へ戻したいときは `Restart` を呼ぶ ―― 指令値は
+      追尾では壊れないので、いつでも戻せる。 }
+    property AfcOn: Boolean read FAfcOn write FAfcOn;
+    { 追尾の速さ。RTTY の AfcSpeed と同じ考え方で 0=遅い / 1=ふつう /
+      2=速い。速いほどドリフトに追うが、雑音で周波数が揺れる。
+      途中で変えても、いま合っているところは動かない。 }
+    property AfcSpeed: Integer read FAfcSpeed write SetAfcSpeed;
+    { 指令周波数からいま何 Hz ずれて見ているか。Evidence にも載せる。 }
+    property AfcOffsetHz: Double read GetAfcOffset;
+    { 追尾が上限に当たった回数。0 でなければ信号を見失っている疑いがある。 }
+    property AfcClamps: Int64 read GetAfcClamps;
+    { 追尾を許すかどうかを決めている品質 (fldigi: afcmetric)。 }
+    property AfcMetric: Double read FAfcMetric;
+    { 実際に補正を適用した回数。品質の門を通った回数でもある。
+      0 のまま増えなければ、DCD は立っていても追尾していない
+      (雑音や弱い信号で品質が門に届かない状態)。 }
+    property AfcUpdates: Int64 read GetAfcUpdates;
     { このモードが 1 秒あたり何ビット送るか。 }
     function BaudRate: Double;
   end;
@@ -184,10 +308,17 @@ begin
 
   inherited Create(ASound, AMode);
   SampleRate := PSK_SAMPLE_RATE;
-  { mcSquelch: RxSymbol が Squelch を実際に見る (DCD の既定判定)。 }
-  Capabilities := Capabilities + [mcRx, mcTx, mcSquelch];
+  { mcSquelch: RxSymbol が Squelch を実際に見る (DCD の既定判定)。
+    mcAFC: 周波数追尾を持つ (MDM-006)。 }
+  Capabilities := Capabilities + [mcRx, mcTx, mcSquelch, mcAFC];
 
   SetupForMode(AMode);
+
+  { 利得は fldigi と同じ 1/dcdbits。どのモードでも時定数は約 1.024 秒で、
+    31.25 ボーなら 32 記号、125 ボーなら 128 記号ぶんになる。 }
+  FAfc.Init(PSK_AFC_RANGE_HZ, 1.0 / FDcdBits);
+  FAfcOn := True;
+  AfcSpeed := PSK_AFC_DEFAULT_SPEED;
   BuildFilters;
   BuildTxShape;
 
@@ -303,10 +434,17 @@ begin
   FDcd := False;
   FDcdOffCounter := 0;
   FQuality := CplxMake(0, 0);
+  FAfcMetric := 0;
   FAverageAmp := 0;
   FCharMinMargin := 1.0;
   FCharHasBits := False;
   SetMetric(0);
+
+  { 追尾で溜めたずれを捨てる。残すと前の音に引かれた周波数から始まり、
+    同じ音から同じ結果が出ない (Z-05)。周波数そのものを戻すのは
+    Restart の仕事で、ここではやらない (RxInit と Restart の分担は
+    Modem.pas の TrackFreq の説明を参照)。 }
+  FAfc.Reset;
 
   if FFir1 <> nil then FFir1.Reset;
   if FFir2 <> nil then FFir2.Reset;
@@ -333,7 +471,11 @@ begin
   { SNR は持っていない。fldigi の metric は品質ベクトルのノルムであって
     dB の SNR ではないので、名乗らない (ユニット冒頭の説明を参照)。 }
   ev.HasSnr := False;
-  ev.HasFreqOffset := False;
+  { 指令された周波数から見て、いまどれだけずれたところを見ているか。
+    最初から切ったままなら 0。追尾のあとで切った場合は、AfcOn の
+    説明のとおり最後に合わせた値がそのまま残る (0 に戻さない)。 }
+  ev.HasFreqOffset := True;
+  ev.FreqOffsetHz := FAfc.Offset;
   EmitDecode(ev);
 end;
 
@@ -408,6 +550,12 @@ begin
   SetMetric(Min(100.0,
     100.0 * (FQuality.Re * FQuality.Re + FQuality.Im * FQuality.Im)));
 
+  { 追尾を許すかどうかの品質。表示用の metric より長くならす
+    (fldigi: decayavg(afcmetric, norm(quality), 50))。 }
+  FAfcMetric := DecayAvg(FAfcMetric,
+    FQuality.Re * FQuality.Re + FQuality.Im * FQuality.Im,
+    PSK_AFC_METRIC_DECAY);
+
   { DCD: 直近の記号列が待機信号の並びかどうかを見る。
     BPSK は symbits=1 なので 2 bit ずつ詰める。
       0xAAAAAAAA = 位相反転が続いている = 送信の頭 (preamble)
@@ -450,8 +598,58 @@ begin
     end;
   end;
 
+  { 周波数の追尾。**信号を捕まえていて、かつ位相が揃っているときだけ。**
+    雑音の位相差は一様なので、測れば当たり前に酔歩する。 }
+  if FAfcOn and FDcd and (FAfcMetric >= PSK_AFC_MIN_QUALITY) then
+    Afc;
+
   { 位相が変わらない = 1、反転した = 0。 }
   RxBit(FBits = 0, margin);
+end;
+
+procedure TPskModem.Afc;
+var
+  err, errHz: Double;
+begin
+  { 判定した位相 (FBits = 0 なら 0、2 なら Pi) からのずれが、
+    1 記号のあいだに余計に回った角度である。 }
+  err := FPhase - FBits * Pi / 2;
+
+  { (-Pi, Pi] へ畳む。FPhase は [0, 2*Pi) なので err は (-Pi, 2*Pi) に
+    入り、1 回引けば足りる。**畳まないと片側しか採らない** ――
+    ユニット冒頭の説明を参照。 }
+  if err > Pi then
+    err := err - 2 * Pi;
+
+  { 角度 [rad/記号] を Hz へ。1 記号は FSymbolLen サンプル。 }
+  errHz := err * SampleRate / (2 * Pi * FSymbolLen);
+
+  { 指令された周波数は壊さない。動かすのは「いま見ている周波数」だけ。 }
+  TrackFreq(FAfc.Track(CommandedFrequency, errHz));
+end;
+
+procedure TPskModem.SetAfcSpeed(AValue: Integer);
+begin
+  if AValue < PSK_AFC_SPEED_SLOW then AValue := PSK_AFC_SPEED_SLOW;
+  if AValue > PSK_AFC_SPEED_FAST then AValue := PSK_AFC_SPEED_FAST;
+  FAfcSpeed := AValue;
+  { ずれはそのまま。速さだけ変える。 }
+  FAfc.SetGain((1 shl AValue) / FDcdBits);
+end;
+
+function TPskModem.GetAfcOffset: Double;
+begin
+  Result := FAfc.Offset;
+end;
+
+function TPskModem.GetAfcClamps: Int64;
+begin
+  Result := FAfc.Clamps;
+end;
+
+function TPskModem.GetAfcUpdates: Int64;
+begin
+  Result := FAfc.Updates;
 end;
 
 function TPskModem.RxProcess(const ABuf: array of Double; ALen: Integer): Integer;
@@ -512,6 +710,9 @@ begin
     begin
       FBitClk := FBitClk - bitSteps;
       RxSymbol(z2);
+      { AFC が周波数を動かしたかもしれない。NCO の刻みを取り直す
+        (位相そのものは連続のままなので、飛びは起きない)。 }
+      delta := 2 * Pi * Frequency / SampleRate;
     end;
   end;
 
