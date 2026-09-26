@@ -1018,12 +1018,24 @@ begin
   R('MDM-015', 'Adaptive Squelchで雑音床から自動的にしきい値を決める',
     expCommunicate, objRobustness, fndIntelligentReceiver,
     [fndModernComputing], False, priShould, 3,
-    '雑音床を変えた Test vectors で、しきい値が追随し過検出/過抑制の' +
-    '既知の限界を超えないことを確認する試験 (未着手)', rsProposed,
-    '§12 Phase 3 Adaptive Squelch。SPC-002/SPC-003 が雑音床と SNR を' +
-    '共有サービス化した直後なので、しきい値を利用者が固定値で決める' +
-    '既存の Squelch (Modem.pas) を、雑音床 + マージンから自動算出する' +
-    '形に拡張するのが最も準備の整った次の一歩に見える。', '');
+    'test_adaptive_squelch (雑音のみでは既定マージンで実測 0/2000 回誤って' +
+    '開かないこと・S/N 10dB では実測 199/200 回開くこと・雑音床が+20dB' +
+    '変わっても同じマージンのまま両方の性質を保つこと・帯域S/N未測定は' +
+    'fail-open・Reset の範囲・確保しない/決定性)', rsVerified,
+    '§12 Phase 3 Adaptive Squelch。SPC-003 の帯域 S/N (雑音床からの相対値)' +
+    'にマージンを掛けるだけで、雑音床の変化に自動追随する ―― これが' +
+    '「適応的」の中身で、マージンの値自体を動かす仕組みは無い。既定マージン' +
+    '3dB は実測で決めた (雑音のみ5000回でSnrInBandDbの最大が-2.175dB、' +
+    '真のS/N 3dBでは平均+2.45dB)。帯域S/Nが未測定なら開けたままにする' +
+    '(fail-open。PSKのSquelch<=0と同じ考え方)。' +
+    '調査で見つけた既存の不整合: **Olivia は mcSquelch を Capabilities に' +
+    '立てているが、Squelch/Metric のどちらも実際には読んでいない**' +
+    '(FSync.Threshold という別の固定しきい値のみ持つ)。ここで作った' +
+    'IsOpen は帯域S/N[dB]という別の尺度で判断するので、PSKのSquelch' +
+    '(0..100の位相整合度) にもOliviaのFSync.Threshold(線形S/N比) にも' +
+    'そのまま代入できる値ではない。単位の対応づけを推測で決めたくないため、' +
+    'どのモデムのSquelch/Metricへどう配線するかはStrategy Manager' +
+    '(MDM-017) 側の役目として残す。', '');
   R('MDM-016', 'Timing errorをReception Stateへ出す',
     expCommunicate, objRobustness, fndIntelligentReceiver,
     [fndModernComputing], False, priShould, 3,
