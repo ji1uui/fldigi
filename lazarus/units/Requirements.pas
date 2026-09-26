@@ -985,6 +985,80 @@ begin
     'ような別方式が要る)。品質の門 (afcmetric>=0.05) で、雑音だけの区間では' +
     '補正 0 回のまま酔歩しない (実測: 5 秒の雑音、速い設定で確認)。', '');
 
+  { Baseline §12 Phase 3 Adaptive Receiver の一覧は 9 項目
+    (Noise Estimator / Reception State Estimator / Adaptive AGC /
+    Adaptive Squelch / AFC / Timing Recovery / Soft Decision /
+    Strategy Manager / Algorithm Portfolio) である。ここまでで:
+
+        Noise Estimator            SPC-002 検証済
+        Reception State Estimator  SPC-003 検証済 (§6.1 の 3/9 項目のみ)
+        AFC                        MDM-006 検証済 (PSK のみ。MFSK/Olivia は後送り)
+        Soft Decision              MDM-004/012 ほか、モードごとに検証済
+                                    (Evidence の MetricKind がそのまま軟判定)
+        Timing Recovery            **機構は各モデムに元からある** (RTTY の
+                                    ビットクロック復元、PSK の FBitClk、MFSK
+                                    の同期追尾、Olivia の頭出し) が、§6.1 の
+                                    「Timing error」として Reception State へ
+                                    出す経路がまだ無い
+
+    残る Adaptive AGC / Adaptive Squelch / Strategy Manager /
+    Algorithm Portfolio はコードが無い。一覧にあって表に無いものは
+    進捗の突き合わせで必ず落ちる (Olivia / RT-009 / SPC-003 と同じ轍)
+    ので、着手前に先に行を立てる。優先順位と根拠は README の該当章を
+    参照。 }
+  R('MDM-014', 'Adaptive AGCで入力の大きさを揃える',
+    expCommunicate, objRobustness, fndIntelligentReceiver,
+    [fndModernComputing], False, priShould, 3,
+    '既知振幅の Test vectors を通し、戦略間で揃った振幅に正規化されること' +
+    'を確認する試験 (未着手)', rsProposed,
+    '§12 Phase 3 Adaptive AGC。Strategy Manager が複数戦略を公平に比べる' +
+    'には、戦略の手前で信号の大きさを揃えておく必要がある ―― 各モデムが' +
+    '個別に持つ振幅ならし (PSK の FAverageAmp 等) とは別に、共有の入力段' +
+    'として立てる。SPC-002 (雑音床) を土台にできる。', '');
+  R('MDM-015', 'Adaptive Squelchで雑音床から自動的にしきい値を決める',
+    expCommunicate, objRobustness, fndIntelligentReceiver,
+    [fndModernComputing], False, priShould, 3,
+    '雑音床を変えた Test vectors で、しきい値が追随し過検出/過抑制の' +
+    '既知の限界を超えないことを確認する試験 (未着手)', rsProposed,
+    '§12 Phase 3 Adaptive Squelch。SPC-002/SPC-003 が雑音床と SNR を' +
+    '共有サービス化した直後なので、しきい値を利用者が固定値で決める' +
+    '既存の Squelch (Modem.pas) を、雑音床 + マージンから自動算出する' +
+    '形に拡張するのが最も準備の整った次の一歩に見える。', '');
+  R('MDM-016', 'Timing errorをReception Stateへ出す',
+    expCommunicate, objRobustness, fndIntelligentReceiver,
+    [fndModernComputing], False, priShould, 3,
+    'test_reception_state の拡張 (Evidence 経由でならされ、時計差のある' +
+    'Test vectors で実際の残差誤差に追随すること) (未着手)', rsProposed,
+    '§6.1 Timing error / §12 Phase 3 Timing Recovery。追尾の機構は' +
+    'モードごとにすでにある。Frequency offset を DecodeEvidence 経由で' +
+    'Reception State (SPC-003) へ通したのと同じ経路を、ビットクロックの' +
+    '残差誤差にも開ける ―― DecodeEvidence に新しい Has*/フィールドを' +
+    '1 組足し、ReceptionStateEstimator.ObserveEvidence に分岐を足す' +
+    '規模の変更で済むはず。', '');
+  R('MDM-017', 'Strategy Managerが受信状態から戦略を選ぶ',
+    expCommunicate, objNewExperience, fndIntelligentReceiver,
+    [fndModernComputing], False, priMust, 3,
+    '既知の受信状態 (SNR/QSB 等) を与え、選ばれる戦略集合が期待どおりに' +
+    '切り替わることを確認する試験 (未着手)', rsProposed,
+    '§6.2 / §12 Phase 3 Strategy Manager。MDM-008 (test_portfolio) が' +
+    '「戦略として再利用可能」であることは固定したが、実際に選ぶ・切り替える' +
+    '仕組みはまだ無い。Reception State (SPC-003) を読んで、どの戦略群を' +
+    'いま動かすかを決める。ADR-009 の方針 (並列性は実測から) により、' +
+    'まず単一スレッドでの切り替えとして作り、並列化は必要になった実測が' +
+    '出てから検討する。', '');
+  R('MDM-018', 'Algorithm Portfolioで複数戦略を並行評価し統計的に改善する',
+    expCommunicate, objRobustness, fndIntelligentReceiver,
+    [fndModernComputing], False, priMust, 3,
+    '定義済み QSB/QRM/AWGN 条件 (test_regression の Test vectors) で、' +
+    '単一戦略 (Normal) より本文CERが統計的に改善することを確認する試験' +
+    ' (未着手)', rsProposed,
+    '§6.2 / §12 Phase 3 Algorithm Portfolio。Baseline の Phase 3 完了条件' +
+    '(「定義済み QSB/QRM/AWGN 条件で Baseline Decoder より統計的改善を' +
+    '確認する」) はこの項目にかかっている。test_realtime の RTTY x3 は' +
+    '性能の見積り (1 本あたり約 1.6%、3 本で deadline の 5.6%) にすぎず、' +
+    '複数戦略の結果を実際に融合する仕組みではない。MDM-017 (Strategy' +
+    'Manager) と対で設計する。', '');
+
   { Baseline §12 の Phase 2 完了条件
       「Phase 2 Decoder は Phase 3 の Normal 戦略として再利用可能であること」
     は、機能一覧ではなく **フェーズの門** である。にもかかわらず §18 に

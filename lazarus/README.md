@@ -6640,3 +6640,133 @@ PSK の `FBitClk` / RTTY の同種のビットクロック復元誤差はすで�
 Selective fading はスペクトルの複数ピーク検出や振幅時系列といった
 新しい計測手段が要るため、Baseline の並び (Adaptive AGC / Adaptive
 Squelch / Timing Recovery) を見ながら次の一歩を選ぶのが筋に見える。
+
+---
+
+## 53. ここまでの振り返り —— 機能・非機能要件の達成状況と、実装計画の改訂
+
+利用者から「機能と非機能の要件が目標を達成できているか確認し、性能向上が
+求められる/見込める機能を整理して、実装計画を改訂してほしい」という依頼が
+あった。ここまで Phase 0〜3 の途中まで進めてきたものを、実測にもとづいて
+棚卸しする。
+
+### 機能要件: Phase 0〜2 は完了、Phase 3 は 9 項目中いくつが済んだか
+
+`test_requirements` の実測 (2026-09 時点):
+
+    要求 77 件 (検証済 56 / 実装済 1 / 方針決定 3 / 起案 11 / 後送り 6)
+
+Phase 0〜2 (CW / RTTY / PSK31,63 / Olivia,Contestia / MFSK / Audio /
+CAT,Hamlib / Macros / Logging / Basic Waterfall) は Waterfall の描画
+(GUI-002。この環境に LCL が無く建てられないだけで、表示の論理 GUI-001 は
+無画面で検証済み) を除いて完了している。
+
+Baseline §12 Phase 3 Adaptive Receiver の一覧は 9 項目。実測にもとづく
+達成状況:
+
+| 項目 | 状態 | 根拠 |
+| --- | --- | --- |
+| Noise Estimator | **検証済** | SPC-002 |
+| Reception State Estimator | **一部検証済** (9項目中3項目) | SPC-003。SNR/Noise floor/Frequency offset のみ |
+| AFC | **一部検証済** (PSKのみ) | MDM-006。MFSK/Olivia は後送り |
+| Soft Decision | **検証済** (モードごとに分散) | MDM-004/012 ほか。全4モードがEvidenceに軟判定尺度を載せる |
+| Timing Recovery | **機構はあるが指標が無い** | 起案 (MDM-016)。§53 で詳述 |
+| Adaptive AGC | **未着手** | 起案 (MDM-014) |
+| Adaptive Squelch | **未着手** | 起案 (MDM-015) |
+| Strategy Manager | **未着手** | 起案 (MDM-017) |
+| Algorithm Portfolio | **未着手** | 起案 (MDM-018) |
+
+「Timing Recovery」は表現に注意が要る。RTTY のビットクロック復元、PSK の
+`FBitClk`、MFSK の記号同期追尾 (§43)、Olivia の頭出し (§47) は**すでに
+どれも動いている**―― これが無ければそもそも復調できない。無いのは
+Frequency offset (MDM-006) と同じように、この誤差を **Reception State へ
+指標として出す経路**である。「機構」と「§6.1 の指標」を混同すると、
+「Timing Recovery が無い」という誤った報告になる。
+
+5 項目 (Adaptive AGC / Adaptive Squelch / Timing error 出力 / Strategy
+Manager / Algorithm Portfolio) は要求の行そのものが無かった。Olivia /
+RT-009 / SPC-003 で繰り返し見つけてきたのと同じ「一覧にあって表に無い」
+穴である。今回は着手前に見つけたので、MDM-014〜018 として先に行を立てた
+(rsProposed。詳しくは各行の根拠を参照)。
+
+### 非機能要件 (性能): 目標を上回っている。危険域は無い
+
+実測 (Xeon 2.80GHz、`test_realtime`):
+
+| 経路 | 平均 | p99 | 最悪 |
+| --- | --- | --- | --- |
+| RTTY 単体 | 1.61% | 1.72% | 3.05% |
+| CW 単体 | 0.61% | 1.34% | 2.86% |
+| PSK31 単体 | 0.18% | 0.38% | **6.29%** |
+| MFSK16 単体 | 0.80% | 1.34% | 4.39% |
+| Olivia32 単体 | 0.33% | 0.57% | 2.86% |
+| RTTY+Spectrum+Waterfall+雑音床 | 2.30% | 6.10% | 14.50% |
+| 戦略 3 本 (RTTY×3)+共有サービス | 5.55% | 9.54% | 15.45% |
+
+deadline は 64 ms (8 kHz・512 サンプル)。判定基準は平均 10% 未満 / p99
+15% 未満 / 最悪 50% 未満 (`test_realtime.lpr` の `MAX_*_RATIO`)。**全項目が
+余裕を持って基準を下回っている。** 戦略を 3 本並べても最悪 15.45% で、
+Phase 3 の取り分は残り約 94%。
+
+ADR-009 (「並行性は要求から導き、並列性は実測から導く」) が Phase 0 の
+時点で立てた方針を、Phase 3 に入った今の実測が裏づけている ―― 単一
+モデムはおろか戦略 3 本を束ねても 1 コアに大きな余裕がある。**現時点で
+性能向上が必要な機能は無い。** スレッドを増やす、並列化するという判断は
+ADR-009 の方針どおり、実測が必要性を示してから行う。
+
+X-04 (確保) / Z-02 (解放漏れ) / Z-05 (決定性) も全スイートで実測済み ――
+`run_tests.sh` は heaptrc を常時有効にし、スイートごとの許容確保数を
+超えたら失敗させる。今回のレビューでもこれを 2 回連続で走らせ、
+出力が完全に一致することを確認した (44 スイート、全成功)。
+
+### 性能向上が見込める箇所 (急務ではないが、整理しておく)
+
+「必要」な項目は無いが、「見込める」箇所はある。優先度をつけて記録する。
+
+| 箇所 | 現状 | 見込み | 優先度 |
+| --- | --- | --- | --- |
+| RTTY の mark/space フィルタ | `TFftFilt` (512点FFTのオーバーラップ加算) を2本並列 | 単一モデム中もっとも平均コストが高い (1.61%)。RTTY は帯域が狭いので Goertzel 型の狭帯域検波に置き換えれば軽くなる余地がある | 低 (余裕が大きく実測の必要性が無い) |
+| PSK/Olivia の最悪値 | 平均に対し最悪が 8〜35 倍 (PSK: 0.18%→6.29%) | Evidence 生成 (`SingleCandidateEvidence` が候補配列を毎回確保) が文字確定のたびに起きる、周期的だが希な重い処理と見られる。プールする余地はあるが、絶対値 (4ms) は deadline の 1/16 で無害 | 低 (原因は説明できており実害が無い) |
+| Reception State / Noise Estimator 自体のコスト | RT-009 の合算にしか入っておらず、単独では未計測 | 単独のマイクロベンチマークが無い。将来 Strategy Manager が高頻度に読むなら単独計測すべき | 中 (SPC-003拡張時に合わせて測るのが効率的) |
+| Algorithm Portfolio のスケール | 戦略3本で平均5.55%・最悪15.45% (1本あたり平均+1.63%) | 平均だけで見れば 10% の基準線 (単体モデム用) に対しあと 4〜5 本ぶんの余地という粗い見積りができる。ただし2点 (1本・3本) からの外挿でしかなく、Strategy Manager 実装時に必ず実測し直すこと | 高 (Phase 3 完了条件そのものに直結する) |
+
+Algorithm Portfolio の見積りだけ優先度を「高」にしたのは、これが
+Baseline の Phase 3 完了条件 (「定義済み QSB/QRM/AWGN 条件で Baseline
+Decoder より統計的改善を確認する」) に直結するためである。性能の問題では
+なく、**Strategy Manager が無ければこの完了条件そのものを試験できない**。
+
+### 改訂した実装計画
+
+以下の順で進める。並び順は「準備が整っている順」であって、Baseline の
+掲載順そのものではない ―― Noise Estimator → AFC → Reception State と、
+すでに掲載順を離れて実装してきたのと同じ考え方である。
+
+1. **MDM-015 Adaptive Squelch** ―― SPC-002/SPC-003 (雑音床・SNR) が
+   直後にあるので、最も準備が整っている。利用者が固定値で決めている
+   既存の `Squelch` (Modem.pas) を、雑音床 + マージンから自動算出する
+   形に拡張する。
+2. **MDM-016 Timing error → Reception State** ―― DecodeEvidence に
+   `HasFreqOffset`/`FreqOffsetHz` と同じ形で 1 組足し、
+   `ReceptionStateEstimator.ObserveEvidence` に分岐を足すだけで済む
+   小さな拡張。§6.1 の 9 項目のうち 4/9 まで進む。
+3. **MDM-014 Adaptive AGC** ―― Strategy Manager が複数戦略を公平に
+   比べるための前段。SPC-002 を土台にできる。
+4. **MDM-017 Strategy Manager / MDM-018 Algorithm Portfolio** ――
+   対で設計する。ADR-009 の方針により、まず単一スレッドでの切り替えと
+   して作り、並列化は実測 (上の見積り表) が必要性を示してから検討する。
+   Baseline の Phase 3 完了条件に直結するため、この 2 つが実質的な
+   フェーズの門になる。
+5. **MFSK/Olivia への AFC** ―― `FreqTracker` (MDM-006 で共有部品化済み)
+   を使えば測り方を書くだけで済むはずだが、上記 4 項目より優先度は低い
+   (README §51 の見立てのとおり)。
+
+性能を理由にした変更 (RTTY のフィルタ置き換え等) はこの並びに入れて
+いない ―― ADR-009 の方針どおり、実測が必要性を示さないかぎり着手しない。
+
+### 検証
+
+- 新規要求 5 件 (MDM-014〜018) を `rsProposed` として追加。
+  `test_requirements` の整合性検査 (§18 突き合わせ・重複無し・Verification
+  必須) を通過
+- 全 44 スイート成功、2 回連続で出力が同一
+- 要求 77 件 (検証済 56 / 実装済 1 / 方針決定 3 / 起案 11 / 後送り 6)
