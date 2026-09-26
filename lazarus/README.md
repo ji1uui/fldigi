@@ -6537,3 +6537,106 @@ MDM-006 は `rsVerified` にした。README §49 の見立てどおり、AFC を
 モード非依存の形にしてあるので、次にどちらかへ追尾を足すときは
 測り方 (誤差の出し方) だけを書けばよいはずである。ただしこれは
 別の要求として Baseline / Requirements.pas に立ててから着手する。
+
+---
+
+## 52. 受信状態推定の共有サービス (SPC-003) —— 9項目のうち実装できたのは3つ
+
+Baseline Phase 3 の一覧は Noise Estimator の次に Reception State Estimator
+を置く。§49 で AFC (MDM-006) を先に片づけたのは「周波数ずれが受信状態の
+一項目だから」という理由だったので、AFC が終わった今度こそ本来の順番に
+戻る。
+
+### §6.1 は 9 項目、実装できたのは 3 項目
+
+Baseline §6.1 は受信状態を SNR / Noise floor / QSB / QRM / Impulse noise /
+Frequency offset・drift / Timing error / Distortion / Selective fading の
+9 項目に分ける。今回実装したのは **SNR / Noise floor / Frequency offset の
+3 つだけ**である。残り 6 項目は測る手段そのものがまだ無い:
+
+- QSB (フェージング) には振幅の時系列とその分散が要る
+- QRM (帯域内の他信号) にはスペクトルの複数ピーク検出が要る
+- Impulse noise には短時間の尖度・衝撃検出が要る
+- Timing error は各モデムのビットクロック復元誤差を Evidence 化する必要が
+  ある (いまはモデム内部に閉じている)
+- Distortion / Selective fading は複数搬送波・帯域内の比較が要る
+
+`TReceptionState` レコードには 9 項目ぶんの `Has*` フラグを先に用意した
+(「後段の Phase への配慮」)。実装していない 6 項目は常に `Has*=False` の
+まま ―― `DecodeEvidence.HasSnr` と同じ約束で、「測っていない」を「測って
+0 だった」と混同させない。要求の文面もこの 3 項目に絞った。Olivia/MFSK
+に AFC が無いことを Requirements の文面だけ広く書いていた過去の轍
+(README 40 章) と同じ形になりかけたので、今回は先に絞った。
+
+### SNR / Noise floor は共有 NoiseEstimator を映すだけ
+
+`TReceptionStateEstimator` は SPC-002 の `TNoiseEstimator` を**所有せず**
+参照するだけである。Noise Estimator は複数の戦略が同じ雑音床を見るための
+共有サービスなので、ここで解放したり、ここの `Reset` で巻き込んで
+リセットしたりしてはいけない ―― 試験で両方向を確かめた
+(反証: `Reset` の中に `FNoise.Reset` を混ぜると、共有サービス側の
+「雑音床が測れたまま」「帯域の設定が残る」の 2 件が落ちる)。
+
+SNR には帯域が要る。どのモードを聞いているかで決まる値なので、
+`ReceptionStateEstimator` 自身は持たず `SetBand` で外から与える。
+帯域を渡すまでは SNR を「まだ」と申告する。
+
+### Frequency offset は Evidence 経由 —— モデムを直接読まない
+
+`ReceptionState` はモデムの内部 (RTTY の `FFreqErr`、PSK の `FAfc.Offset`)
+を直接読まない。**Evidence 経由** (`ObserveEvidence`) で受け取る。
+`DecodeEvidence.HasFreqOffset` / `FreqOffsetHz` は ADR-002 が定めた
+「受信状態を運ぶ唯一の経路」で、RTTY と PSK (MDM-006) がすでにここへ
+載せている。モデムごとに専用の読み出し窓口を作ると、モデムが増えるたびに
+ここも増やすことになる ―― Evidence を経由すれば、モデム側が
+`HasFreqOffset` を立てるだけで自動的にここへ集まる。
+
+1 回の Evidence をそのまま「いまの受信状態」と言うと、雑音で 1 文字ぶん
+跳ねた値がそのまま出てしまう。PSK の `AfcMetric` / RTTY の `FFreqErr` と
+同じ `DecayAvg` でならした。**`HasFreqOffset` が立っていない Evidence
+(CW のような周波数情報を持たないモデム) は無視する** ―― 混ぜると
+「測っていない」の 0 が平均に混入する。
+
+### 見つけた試験の誤り (反証で見つかった、AFC の章と同じ形)
+
+最初に書いた「無視される」試験は 10 回だけ無視対象の Evidence を流し、
+しきい値 `>5.0Hz` で見ていた。ならしの重み (既定 20) では、無視せず
+0 へ混ぜても 10 回では 8.7 Hz までしか下がらない ―― **改竄して確かめたら
+検出できなかった**。100 回に増やし、しきい値ではなく「直前の値と厳密に
+一致する」(無視できていれば一切動かないはず) に直したところ、同じ改竄が
+ちゃんと落ちるようになった。AFC の章 (§51) で見つけた「しきい値が甘くて
+改竄をすり抜けさせる」パターンがここでも起きた ―― 反証は毎回やる意味が
+ある。
+
+もう1つ、確保数の試験で `SingleCandidateEvidence` (Candidates 配列を
+毎回確保する) を計測窓の中で呼んでいたため、50 回で 51 回確保という
+結果になった。これは `ReceptionState` 自身の確保ではなく Evidence を
+**組み立てる側**の性質である。Evidence を計測窓の外で先に作っておく形に
+直した。
+
+### 反証
+
+| 壊し方 | 落ちた主張 |
+| --- | --- |
+| 最初の1件もならす (DecayAvgを常に使う) | 「最初の1件はそのまま基準にする」 |
+| HasFreqOffset の無視をやめる | 「無視した回数」+「値が動かない」の2件 |
+| SNR に +3dB 混ぜる (独自計算に見せかける) | 「共有の計算をそのまま使う」 |
+| Reset が共有 NoiseEstimator まで巻き込む | 「共有には触れない」+「帯域が残る」の2件 |
+
+4 種類の改竄で、それぞれ別の主張が落ちることを確認した。
+
+### 検証
+
+- 新規 `test_reception_state` (31 件)
+- 全 44 スイート成功、2 回連続で出力が同一
+- 確保 0 回 (50 回の観測+読み出し)、同じ入力から同じ結果 (Z-05)
+
+### 次
+
+Reception State Estimator は SNR/NoiseFloor/FreqOffset の 3 本足で立った。
+残り 6 項目のうち、次に手が届きそうなのは Timing error である ――
+PSK の `FBitClk` / RTTY の同種のビットクロック復元誤差はすでに内部に
+持っており、Evidence 化すれば同じ経路に載る。QSB/QRM/Impulse/Distortion/
+Selective fading はスペクトルの複数ピーク検出や振幅時系列といった
+新しい計測手段が要るため、Baseline の並び (Adaptive AGC / Adaptive
+Squelch / Timing Recovery) を見ながら次の一歩を選ぶのが筋に見える。

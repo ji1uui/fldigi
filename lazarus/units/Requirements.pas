@@ -766,6 +766,26 @@ begin
     '帯域S/Nの追随/取りこぼしと流し直しの申告/ならし/確保しない)',
     rsVerified, '§4 X-05, §12 Phase 3 Noise Estimator', '');
 
+  { Baseline §6.1 は受信状態を 9 項目に分ける (SNR / Noise floor / QSB /
+    QRM / Impulse noise / Frequency offset・drift / Timing error /
+    Distortion / Selective fading)。実装できたのは SNR / Noise floor /
+    Frequency offset の 3 つだけである。残り 6 項目は測る手段そのものが
+    まだ無い (振幅の時系列、複数ピーク検出、衝撃検出、ビットクロック誤差の
+    Evidence 化、複数搬送波比較) ―― 型には 9 項目ぶんの入れ物を用意し、
+    測れない項目は DecodeEvidence.HasSnr と同じ約束で Has*=False のまま
+    にした。3 項目だけの実装を「受信状態推定ができた」と広く名乗ると、
+    Olivia/MFSK に AFC が無いことを Requirements の文面だけ広く書いて
+    いた過去の轍と同じになるので、要求の文面をこの 3 項目に絞ってある。 }
+  R('SPC-003', '受信状態推定(SNR/雑音床/周波数ずれ)を共有サービス化する',
+    expCommunicate, objRobustness, fndIntelligentReceiver,
+    [fndModernComputing], False, priMust, 3,
+    'test_reception_state (SNR/NoiseFloor が共有 NoiseEstimator の値を' +
+    'そのまま映すこと・帯域を渡すまで SNR は測れないこと・周波数ずれが ' +
+    'Evidence 経由でならされ HasFreqOffset の無い Evidence は無視される' +
+    'こと・Reset が周波数のならしだけを捨て共有サービスに触れないこと・' +
+    '未実装の6項目が常にHas*=Falseであること・確保しない/決定性)',
+    rsVerified, '§6.1, §12 Phase 3 Reception State Estimator', '');
+
   R('OBS-001', '障害診断のため出来事を時系列で残す',
     expCommunicate, objRobustness, fndEngineeringQuality, [],
     False, priMust, 0, 'test_observability', rsVerified, '§14 Z-01', 'ADR-010');
