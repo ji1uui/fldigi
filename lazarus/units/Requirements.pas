@@ -1068,7 +1068,7 @@ begin
     '(「定義済み QSB/QRM/AWGN 条件で Baseline Decoder より統計的改善を' +
     '確認する」) はこの項目にかかっている。test_realtime の RTTY x3 は' +
     '性能の見積り (1 本あたり約 1.6%、3 本で deadline の 5.6%) にすぎず、' +
-    '複数戦略の結果を実際に融合する仕組みではない。MDM-017 (Strategy' +
+    '複数戦略の結果を実際に融合する仕組みではない。MDM-017 (Strategy ' +
     'Manager) と対で設計する。', '');
 
   { Baseline §12 の Phase 2 完了条件

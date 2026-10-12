@@ -742,7 +742,9 @@ begin
   RandSeed := 20240921;
   for i := 0 to POOLBLKS * BLK - 1 do
     pool[i] := 0.3 * Sin(2 * Pi * 1000 * i / SR) + NOISEAMP * (2 * Random - 1);
-  Move(pool[0], buf[0], BLK * SizeOf(Double));
+  { buf 自体は最初の WARMUP 反復が Move で埋めるので、ここでは
+    まだ埋めない (前は埋めていたが、どの反復にも先立って上書きされる
+    死んだ代入だった)。 }
 
   snd := TCaptureSoundDevice.Create;
   sp := nil; wf := nil; ne := nil;
